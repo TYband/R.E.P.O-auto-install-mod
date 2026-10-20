@@ -57,6 +57,7 @@
 - **自动清旧版本** —— 同一个 Mod 装了新旧两个版本会导致重复加载、游戏闪退，每次安装自动清理
 - **安装前备份** —— 首次安装会把原有 `BepInEx` 备份到 `data/backups/`
 - **精确卸载** —— 按安装清单逐个文件删除，不留垃圾
+- **云同步账号** —— 注册一个账号，把 Mod 清单存到云端；换机器一键对比补装，还能按用户名搜玩家、直接装别人那套
 
 ---
 
@@ -170,6 +171,7 @@ Thunderstore 上每个 Mod 的 `manifest.json` 里都有 `dependencies` 字段�
 | **右：详情面板**     | 112px 大图标 + 作者 / 版本 / 下载量 / 包体积 / 已装版本 + 官方简介 + 依赖清单 + 安装/打开网页/卸载 |
 | **翻译按钮**       | 详情面板名字右边，点一下名字和简介变中文，按钮变成「还原」，再点回原文                       |
 | **底部：运行日志**    | 每一步在做什么，出错原因也在这里；右上角「收起」可折叠，给列表腾地方                          |
+| **右上角账号**      | 「登录 / 注册」→ 登录后变成 `@你的用户名`，点开是云同步窗口（见下文「云同步」）              |
 
 几个细节：
 
@@ -216,6 +218,63 @@ Thunderstore 上每个 Mod 的 `manifest.json` 里都有 `dependencies` 字段�
 
 ---
 
+## 云同步（账号 / 存档 Mod 列表 / 找玩家）
+
+网吧的痛点不只是"要手动装"，还有"这台机器上装好的配置，下次换一台就没了"。云同步解决这个：
+
+| 能力 | 说明 |
+| --- | --- |
+| **创建账号** | 点右上角「登录 / 注册」，用户名 3-20 位字母数字，密码至少 6 位。不需要邮箱，不需要验证码 |
+| **存 Mod 列表** | 把当前这台机器的 Mod 清单（名字 + 版本）存到云端，换机器后一键对比、补装 |
+| **手动同步** | 「↑ 上传到云端」推当前列表；「↓ 对比云端」拉下来跟本机比，列出**云端有本机没有**、**版本不一致**、**本机多出来**三类，缺的可以一键补装 |
+| **找玩家** | 按用户名搜索，看对方装了哪些 Mod，可以「一键装 TA 的全套」或只装选中的几个 |
+| **隐私开关** | 账号区有「公开我的列表」勾选框，取消后别人搜不到你，也看不了你的列表 |
+
+![云同步](docs/cloud-sync.png)
+
+![找玩家](docs/cloud-find.png)
+
+### 同步的粒度
+
+存的是**清单**，不是 Mod 文件。一条记录只有 `full_name` / `version` / `name`，几十 KB。装的时候按名字去 Thunderstore 取最新版，所以：
+
+- 对方上传了旧版本，你装到的仍是最新兼容版本
+- 云端只是"我装了什么"的备忘录，不承担分发 Mod 的责任（Mod 版权归作者）
+
+### 服务器
+
+后端在 `server/`，是一个单文件 FastAPI + SQLite 服务，1 核 1G 的小机器就能跑：
+
+```
+客户端 ──HTTP──> nginx :8080 ──> uvicorn 127.0.0.1:8000 ──> SQLite
+```
+
+对外地址写在 `cloud.py` 的 `DEFAULT_BASE`，也可以在 `config.json` 里用 `cloud_url` 覆盖（换成自己的服务器时改这里）。
+
+部署（在服务器上执行）：
+
+```bash
+scp -r server/ ubuntu@<你的服务器>:/tmp/repo-deploy/
+ssh ubuntu@<你的服务器> "cd /tmp/repo-deploy && sudo bash deploy.sh"
+```
+
+`deploy.sh` 会做：建 venv 装依赖 → 装 systemd 服务 → 在已有 nginx 站点里加 `location /api/` 反代 → 自检公网可达。脚本是幂等的，改完代码重跑一次即可。
+
+| 接口 | 作用 |
+| --- | --- |
+| `POST /api/register` · `POST /api/login` | 注册 / 登录，返回令牌 |
+| `GET /api/me` | 当前账号信息 |
+| `PUT /api/mods` · `GET /api/mods` | 上传 / 拉取自己的列表 |
+| `GET /api/users/search?q=` | 按用户名搜玩家 |
+| `GET /api/users/{name}` | 看某个玩家的列表 |
+| `POST /api/privacy` | 公开 / 私密切换 |
+
+接口文档在 `http://<服务器>:8080/api/docs`。
+
+安全上的几个处理：密码用 PBKDF2-HMAC-SHA256 走 20 万轮存哈希；令牌存库，可随时吊销，180 天不用自动失效；注册/登录按 IP 限流；服务只监听 `127.0.0.1`，不直接暴露到公网。
+
+---
+
 ## 配置
 
 复制 `config.example.json` 为 `config.json` 后修改（`config.json` 含本机路径，已在 `.gitignore` 中排除）：
@@ -225,6 +284,7 @@ Thunderstore 上每个 Mod 的 `manifest.json` 里都有 `dependencies` 字段�
     "game_path": "",
     "local_mods_dir": "",
     "proxy": "",
+    "cloud_url": "",
     "backup_before_install": true,
     "auto_install_list": [
         "Zehs-REPOLib",
@@ -238,6 +298,7 @@ Thunderstore 上每个 Mod 的 `manifest.json` 里都有 `dependencies` 字段�
 | `game_path`             | 游戏目录。**留空 = 自动检测**（网吧盘符不固定，建议留空）                          |
 | `local_mods_dir`        | 离线包目录。留空 = 使用项目自带的 `mods/`                                |
 | `proxy`                 | 下载代理，如 `http://127.0.0.1:7890`。Thunderstore 服务器在境外，网络慢时可填 |
+| `cloud_url`             | 云同步服务器地址。留空 = 用内置的默认地址；想自己搭就填 `http://你的IP:8080` |
 | `backup_before_install` | 首次安装前是否备份原有 BepInEx                                       |
 | `auto_install_list`     | 「一键安装我的配置」的 Mod 清单，填 Thunderstore 全名（`作者-Mod名`）           |
 
@@ -281,11 +342,19 @@ repo-mod-installer/
 ├── make_seed.py           # 打包前把索引压成种子塞进 exe
 ├── mod_installer.py       # 图形界面（Tkinter）
 ├── core.py                # 核心逻辑：定位/解析/解包/安装
+├── cloud.py               # 云同步客户端：注册/登录/上传/搜索
 ├── config.example.json    # 配置模板
 ├── requirements.txt
 ├── LICENSE
+├── server/                # 云端后端（部署到自己的服务器）
+│   ├── app.py             # FastAPI + SQLite，单文件
+│   ├── deploy.sh          # 一键部署：venv + systemd + nginx 反代
+│   ├── repo-mod-api.service
+│   └── requirements.txt
 ├── docs/
-│   └── screenshot.png
+│   ├── screenshot.png
+│   ├── cloud-sync.png
+│   └── cloud-find.png
 ├── mods/                  # 离线 mod 包（*.zip 不入库）
 │   └── README.md
 └── data/                  # 运行时生成，不入库
@@ -321,6 +390,16 @@ repo-mod-installer/
 
 **Q：点了「翻译」没反应 / 提示翻译失败？**  
 名字是本地词表翻的，不会失败；失败的只会是简介，说明腾讯翻译君和 MyMemory 都连不上。在 `config.json` 里填 `"proxy": "http://127.0.0.1:7897"`（改成你自己的代理端口）再点一次即可。日志里会写明走了哪个接口。
+
+**Q：云同步提示「连不上服务器」？**  
+先看日志里打印的地址。默认是 `http://150.230.169.157:8080`，若服务器换了或你自己搭，在 `config.json` 填 `"cloud_url": "http://你的地址:端口"`。  
+注意工具**不会**读取系统的 `HTTP_PROXY` 环境变量（避免本机代理把 127.0.0.1 也绕进去），要代理就显式写 `proxy` 字段。
+
+**Q：换台机器后怎么恢复我的 Mod？**  
+登录 → 点「↓ 对比云端」→ 它会列出云端有而本机没有的，点「补装缺少的」即可。补装走的是正常安装流程，依赖会自动补齐。
+
+**Q：别人能看到我的 Mod 列表吗？**  
+默认公开（否则「找玩家」没意义）。不想被看到就取消账号区的「公开我的列表」勾选，之后别人搜不到你、也打不开你的列表。
 
 **Q：日志说「Google 连不上」，是不是坏了？**  
 不是。Google 翻译在国内直连是不通的，工具会自动换成腾讯翻译君，译文质量也够用。想用 Google 就配 `proxy`。
@@ -384,6 +463,24 @@ Installing mods for R.E.P.O. by hand involves three tedious layers: setting up t
 - Removes stale versions of the same mod (a common cause of crashes)
 - Backs up the existing `BepInEx` directory before the first install
 - Uses the **r2modman / Gale** directory convention, so it stays compatible with those managers
+- **Cloud sync**: sign up for an account (no email needed), push your mod list, and pull it back on another machine — the diff view tells you exactly which mods are missing or out of date. You can also search other players by username and install their whole list in one click.
+
+**Cloud backend**
+
+`server/` holds a single-file FastAPI + SQLite service. One small VM is enough:
+
+```
+client ──HTTP──> nginx :8080 ──> uvicorn 127.0.0.1:8000 ──> SQLite
+```
+
+```bash
+scp -r server/ ubuntu@<your-server>:/tmp/repo-deploy/
+ssh ubuntu@<your-server> "cd /tmp/repo-deploy && sudo bash deploy.sh"
+```
+
+`deploy.sh` creates the venv, installs a systemd unit, adds an nginx `location /api/` proxy to the existing site, and self-checks public reachability. It is idempotent. Passwords are hashed with PBKDF2-HMAC-SHA256 (200k rounds), tokens are stored server-side and revocable, and the app only listens on `127.0.0.1`.
+
+Point the client elsewhere with `"cloud_url": "http://your-host:8080"` in `config.json`.
 
 **Quick start**
 

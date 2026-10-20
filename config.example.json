@@ -2,6 +2,7 @@
     "game_path": "",
     "local_mods_dir": "",
     "proxy": "",
+    "cloud_url": "",
     "backup_before_install": true,
     "auto_install_list": [
         "Zehs-REPOLib",

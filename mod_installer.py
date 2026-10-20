@@ -34,6 +34,7 @@ except ImportError:
     raise SystemExit(1)
 
 import core
+import cloud as cloudmod
 
 # 有 Pillow 就用它做高质量缩放 + 圆角，没有则退回 Tk 原生 PNG
 try:
@@ -183,9 +184,13 @@ class App:
         self._tr_on = False
         self._raw_name = ""
 
+        self.cloud = cloudmod.Cloud(self.cfg)
+        self._cloud_win = None
+
         self._setup_style()
         self._build()
         self._fit_window()
+        self._render_account()
 
         self.icons = IconCache(root, log=self._log)
 
@@ -306,6 +311,13 @@ class App:
         self.chip = tk.Label(head, text="检测中…", bg="#eef1f5", fg=MUTED,
                              font=(F, 9), padx=12, pady=5)
         self.chip.pack(side="right")
+
+        # 账号 / 云同步入口
+        self.acct_box = tk.Frame(head, bg=BG)
+        self.acct_box.pack(side="right", padx=(0, 10))
+        self.btn_acct = ttk.Button(self.acct_box, text="登录 / 注册", style="Ghost.TButton",
+                                   command=self._open_cloud)
+        self.btn_acct.pack(side="right")
 
         self._hline(outer, pady=(12, 12))
 
@@ -1180,6 +1192,567 @@ class App:
 
     def _clear_cache(self):
         core.clear_cache(log=self._log)
+
+    # -------------------------------------------------- 云同步
+    def _open_cloud(self):
+        if self._cloud_win and self._cloud_win.win.winfo_exists():
+            self._cloud_win.win.lift()
+            self._cloud_win.win.focus_force()
+            return
+        self._cloud_win = CloudWindow(self)
+
+    def _render_account(self):
+        """顶部按钮跟随登录状态变化"""
+        if self.cloud.logged_in:
+            self.btn_acct.configure(text=f"@{self.cloud.username}")
+        else:
+            self.btn_acct.configure(text="登录 / 注册")
+
+
+# ============================================================
+# 云同步窗口
+# ============================================================
+
+class CloudWindow:
+    """账号 / 我的 Mod 列表 / 找玩家"""
+
+    def __init__(self, app):
+        self.app = app
+        self.cloud = app.cloud
+        self.remote_mods = []      # 我上传到云端的
+        self.missing = []          # 云端有、本机没有的
+        self.users = []            # 搜索结果
+        self.other_user = ""
+        self.other_mods = []
+
+        w = tk.Toplevel(app.root)
+        self.win = w
+        w.title("云同步 · 账号与 Mod 列表")
+        w.configure(bg=BG)
+        w.transient(app.root)
+        w.protocol("WM_DELETE_WINDOW", self.close)
+        w.bind("<Escape>", lambda e: self.close())
+
+        self._build()
+        self._fit()
+        self._refresh_account()
+        self._update_local_meta()
+        if self.cloud.logged_in:
+            self._bg(self.cloud.me,
+                     lambda u: (self._refresh_account(), self._update_local_meta()))
+
+    # -------------------------------------------------- 布局
+    def _fit(self):
+        self.win.update_idletasks()
+        sw = self.win.winfo_screenwidth()
+        sh = self.win.winfo_screenheight()
+        w = min(660, sw - 80)
+        h = min(760, sh - 110)
+        x = max(0, (sw - w) // 2)
+        y = max(0, (sh - h) // 2 - 20)
+        self.win.geometry(f"{w}x{h}+{x}+{y}")
+        self.win.minsize(min(600, w), min(600, h))
+
+    def _build(self):
+        outer = tk.Frame(self.win, bg=BG)
+        outer.pack(fill="both", expand=True, padx=16, pady=(14, 12))
+
+        head = tk.Frame(outer, bg=BG)
+        head.pack(fill="x")
+        tk.Label(head, text="云同步", bg=BG, fg=TEXT,
+                 font=(F, 14, "bold")).pack(side="left")
+        self.server_lbl = tk.Label(head, text=self.cloud.base, bg=BG, fg=MUTED,
+                                   font=(F, 8))
+        self.server_lbl.pack(side="left", padx=(10, 0), pady=(5, 0))
+        ttk.Button(head, text="关闭", style="Mini.TButton",
+                   command=self.close).pack(side="right")
+
+        st = ttk.Style()
+        st.configure("Cloud.TNotebook", background=BG, borderwidth=0,
+                     tabmargins=(0, 8, 0, 0))
+        st.configure("Cloud.TNotebook.Tab", background="#e6eaf1", foreground=MUTED,
+                     padding=(20, 8), font=(F, 9), borderwidth=0)
+        st.map("Cloud.TNotebook.Tab",
+               background=[("selected", CARD), ("active", "#eff3f9")],
+               foreground=[("selected", ACCENT)])
+
+        st.configure("Cloud.Treeview", background=CARD, fieldbackground=CARD,
+                     foreground=TEXT, borderwidth=0, relief="flat",
+                     rowheight=30, font=(F, 9))
+        st.configure("Cloud.Treeview.Heading", background=CARD, foreground=MUTED,
+                     borderwidth=0, relief="flat", padding=(6, 7),
+                     font=(F, 9, "bold"))
+        st.map("Cloud.Treeview", background=[("selected", ACCENT_LT)],
+               foreground=[("selected", TEXT)])
+
+        self.nb = ttk.Notebook(outer, style="Cloud.TNotebook")
+        self.nb.pack(fill="both", expand=True)
+
+        self.tab_me = tk.Frame(self.nb, bg=BG)
+        self.tab_find = tk.Frame(self.nb, bg=BG)
+        self.nb.add(self.tab_me, text="我的同步")
+        self.nb.add(self.tab_find, text="找玩家")
+
+        self._build_me(self.tab_me)
+        self._build_find(self.tab_find)
+
+    # ---- 我的同步 ----
+    def _build_me(self, parent):
+        o, inner = self.app._card(parent)
+        o.pack(fill="x", pady=(10, 0))
+        pad = tk.Frame(inner, bg=CARD)
+        pad.pack(fill="x", padx=16, pady=14)
+
+        tk.Label(pad, text="账号", bg=CARD, fg=TEXT,
+                 font=(F, 10, "bold")).pack(anchor="w")
+        self.acct_body = tk.Frame(pad, bg=CARD)
+        self.acct_body.pack(fill="x", pady=(10, 0))
+
+        o2, inner2 = self.app._card(parent)
+        o2.pack(fill="both", expand=True, pady=(12, 0))
+        pad2 = tk.Frame(inner2, bg=CARD)
+        pad2.pack(fill="both", expand=True, padx=16, pady=14)
+
+        tk.Label(pad2, text="我的 Mod 列表", bg=CARD, fg=TEXT,
+                 font=(F, 10, "bold")).pack(anchor="w")
+        self.sync_meta = tk.Label(pad2, text="", bg=CARD, fg=MUTED, font=(F, 9),
+                                  anchor="w", justify="left", wraplength=560)
+        self.sync_meta.pack(fill="x", pady=(8, 0))
+
+        btns = tk.Frame(pad2, bg=CARD)
+        btns.pack(fill="x", pady=(14, 0))
+        self.btn_push = ttk.Button(btns, text="↑ 上传到云端", style="Accent.TButton",
+                                   command=self._push)
+        self.btn_push.pack(side="left")
+        self.btn_pull = ttk.Button(btns, text="↓ 对比云端", style="Ghost.TButton",
+                                   command=self._pull)
+        self.btn_pull.pack(side="left", padx=(8, 0))
+        self.btn_fill = ttk.Button(btns, text="补装缺少的", style="Ghost.TButton",
+                                   command=self._install_missing, state="disabled")
+        self.btn_fill.pack(side="left", padx=(8, 0))
+
+        diff_wrap = tk.Frame(pad2, bg=CARD)
+        diff_wrap.pack(fill="both", expand=True, pady=(14, 0))
+        self.diff_lbl = tk.Text(diff_wrap, height=9, wrap="word", font=(F, 9),
+                                bg=CARD, fg="#4b5563", relief="flat",
+                                padx=0, pady=0, state="disabled",
+                                insertbackground=TEXT, selectbackground=ACCENT_LT)
+        self.diff_lbl.pack(side="left", fill="both", expand=True)
+        dsb = ttk.Scrollbar(diff_wrap, orient="vertical", command=self.diff_lbl.yview)
+        self.diff_lbl.configure(yscrollcommand=dsb.set)
+        dsb.pack(side="right", fill="y")
+
+        self.msg_me = tk.Label(pad2, text="", bg=CARD, fg=MUTED, font=(F, 9),
+                               anchor="w", justify="left", wraplength=560)
+        self.msg_me.pack(fill="x", pady=(8, 0))
+
+    # ---- 找玩家 ----
+    def _build_find(self, parent):
+        o, inner = self.app._card(parent)
+        o.pack(fill="x", pady=(10, 0))
+        bar = tk.Frame(inner, bg=CARD)
+        bar.pack(fill="x", padx=16, pady=12)
+        tk.Label(bar, text="搜索玩家", bg=CARD, fg=MUTED,
+                 font=(F, 9)).pack(side="left")
+        self.q_var = tk.StringVar()
+        e = ttk.Entry(bar, textvariable=self.q_var, width=26)
+        e.pack(side="left", padx=(8, 8))
+        e.bind("<Return>", lambda ev: self._search())
+        self.btn_search = ttk.Button(bar, text="搜索", style="Ghost.TButton",
+                                     command=self._search)
+        self.btn_search.pack(side="left")
+
+        o2, inner2 = self.app._card(parent)
+        o2.pack(fill="x", pady=(12, 0))
+        wrap = tk.Frame(inner2, bg=CARD)
+        wrap.pack(fill="x", padx=10, pady=10)
+        self.utree = ttk.Treeview(wrap, columns=("name", "cnt", "when"),
+                                  show="headings", selectmode="browse", height=5,
+                                  style="Cloud.Treeview")
+        self.utree.heading("name", text="玩家")
+        self.utree.heading("cnt", text="Mod 数")
+        self.utree.heading("when", text="最后同步")
+        self.utree.column("name", width=200, anchor="w")
+        self.utree.column("cnt", width=80, anchor="center", stretch=False)
+        self.utree.column("when", width=170, anchor="center", stretch=False)
+        self.utree.pack(side="left", fill="both", expand=True)
+        usb = ttk.Scrollbar(wrap, orient="vertical", command=self.utree.yview)
+        self.utree.configure(yscrollcommand=usb.set)
+        usb.pack(side="right", fill="y")
+        self.utree.bind("<<TreeviewSelect>>", lambda e: self._pick_user())
+
+        o3, inner3 = self.app._card(parent)
+        o3.pack(fill="both", expand=True, pady=(12, 0))
+        pad3 = tk.Frame(inner3, bg=CARD)
+        pad3.pack(fill="both", expand=True, padx=16, pady=14)
+        self.other_title = tk.Label(pad3, text="TA 的 Mod 列表", bg=CARD, fg=TEXT,
+                                    font=(F, 10, "bold"))
+        self.other_title.pack(anchor="w")
+
+        wrap2 = tk.Frame(pad3, bg=CARD)
+        wrap2.pack(fill="both", expand=True, pady=(10, 0))
+        self.mtree = ttk.Treeview(wrap2, columns=("name", "ver"),
+                                  show="headings", selectmode="browse", height=6,
+                                  style="Cloud.Treeview")
+        self.mtree.heading("name", text="Mod")
+        self.mtree.heading("ver", text="版本")
+        self.mtree.column("name", width=380, anchor="w")
+        self.mtree.column("ver", width=110, anchor="center", stretch=False)
+        self.mtree.pack(side="left", fill="both", expand=True)
+        msb = ttk.Scrollbar(wrap2, orient="vertical", command=self.mtree.yview)
+        self.mtree.configure(yscrollcommand=msb.set)
+        msb.pack(side="right", fill="y")
+
+        foot = tk.Frame(pad3, bg=CARD)
+        foot.pack(fill="x", pady=(12, 0))
+        self.btn_use = ttk.Button(foot, text="一键装 TA 的全套", style="Accent.TButton",
+                                  command=self._install_other, state="disabled")
+        self.btn_use.pack(side="left")
+        self.btn_pick = ttk.Button(foot, text="装选中的", style="Ghost.TButton",
+                                   command=self._install_other_picked, state="disabled")
+        self.btn_pick.pack(side="left", padx=(8, 0))
+        self.msg_find = tk.Label(pad3, text="", bg=CARD, fg=MUTED, font=(F, 9),
+                                 anchor="w", justify="left", wraplength=560)
+        self.msg_find.pack(fill="x", pady=(8, 0))
+
+    # -------------------------------------------------- 小工具
+    def close(self):
+        self.app._cloud_win = None
+        try:
+            self.win.destroy()
+        except Exception:
+            pass
+
+    def _set_diff(self, text):
+        try:
+            self.diff_lbl.configure(state="normal")
+            self.diff_lbl.delete("1.0", "end")
+            self.diff_lbl.insert("1.0", text)
+            self.diff_lbl.configure(state="disabled")
+        except Exception:
+            pass
+
+    def _say(self, label, text, color=MUTED):
+        try:
+            label.configure(text=text, fg=color)
+        except Exception:
+            pass
+
+    def _bg(self, fn, on_ok=None):
+        """后台跑 fn()，成功结果交回主线程"""
+        def work():
+            try:
+                r = fn()
+            except cloudmod.CloudError as e:
+                m = str(e)
+                self.app._ui(lambda: self._fail(m))
+                return
+            except Exception as e:
+                m = f"{type(e).__name__}: {e}"
+                self.app._ui(lambda: self._fail(m))
+                return
+            if on_ok:
+                self.app._ui(lambda: on_ok(r))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _fail(self, msg):
+        # 登录/注册失败时提示要落在账号区，不能只写进同步区
+        for lbl in (getattr(self, "_auth_msg", None), self.msg_me, self.msg_find):
+            if lbl is not None:
+                self._say(lbl, f"✗ {msg}", BAD)
+        self._enable(True)
+
+    def _enable(self, on):
+        st = "normal" if on else "disabled"
+        for b in (self.btn_push, self.btn_pull, self.btn_search):
+            try:
+                b.configure(state=st)
+            except Exception:
+                pass
+
+    # -------------------------------------------------- 账号
+    def _refresh_account(self):
+        for c in self.acct_body.winfo_children():
+            c.destroy()
+
+        if self.cloud.logged_in:
+            row = tk.Frame(self.acct_body, bg=CARD)
+            row.pack(fill="x")
+            tk.Label(row, text=f"@{self.cloud.username}", bg=CARD, fg=ACCENT,
+                     font=(F, 12, "bold")).pack(side="left")
+            u = self.cloud.user or {}
+            if u.get("is_public") is False:
+                tk.Label(row, text="私密", bg="#eef1f5", fg=MUTED, font=(F, 8),
+                         padx=6, pady=1).pack(side="left", padx=(8, 0), pady=(3, 0))
+
+            self.acct_info = tk.Label(self.acct_body, text="", bg=CARD, fg=MUTED,
+                                      font=(F, 9), anchor="w")
+            self.acct_info.pack(fill="x", pady=(6, 0))
+            self._render_acct_info()
+
+            sub = tk.Frame(self.acct_body, bg=CARD)
+            sub.pack(fill="x", pady=(10, 0))
+            self.pub_var = tk.BooleanVar(value=(u.get("is_public", True) is not False))
+            ttk.Checkbutton(sub, text="公开我的列表，让别人能搜到我",
+                            variable=self.pub_var,
+                            command=self._toggle_public).pack(side="left")
+            ttk.Button(sub, text="退出登录", style="Mini.TButton",
+                       command=self._logout).pack(side="right")
+        else:
+            self.acct_info = None
+            form = tk.Frame(self.acct_body, bg=CARD)
+            form.pack(fill="x")
+            tk.Label(form, text="用户名", bg=CARD, fg=MUTED,
+                     font=(F, 9)).grid(row=0, column=0, sticky="w", pady=(0, 6))
+            self.u_var = tk.StringVar()
+            ttk.Entry(form, textvariable=self.u_var, width=22).grid(
+                row=0, column=1, sticky="w", padx=(8, 14), pady=(0, 6))
+            tk.Label(form, text="密码", bg=CARD, fg=MUTED,
+                     font=(F, 9)).grid(row=0, column=2, sticky="w", pady=(0, 6))
+            self.p_var = tk.StringVar()
+            pe = ttk.Entry(form, textvariable=self.p_var, width=22, show="•")
+            pe.grid(row=0, column=3, sticky="w", padx=(8, 0), pady=(0, 6))
+            pe.bind("<Return>", lambda e: self._auth("login"))
+
+            row = tk.Frame(self.acct_body, bg=CARD)
+            row.pack(fill="x", pady=(10, 0))
+            ttk.Button(row, text="登录", style="Accent.TButton",
+                       command=lambda: self._auth("login")).pack(side="left")
+            ttk.Button(row, text="创建账号", style="Ghost.TButton",
+                       command=lambda: self._auth("register")).pack(side="left", padx=(8, 0))
+            tk.Label(row, text="用户名 3-20 位字母数字，密码至少 6 位",
+                     bg=CARD, fg=MUTED, font=(F, 8)).pack(side="left", padx=(12, 0))
+
+        self._auth_msg = tk.Label(self.acct_body, text="", bg=CARD, fg=MUTED,
+                                  font=(F, 9), anchor="w", justify="left",
+                                  wraplength=560)
+        self._auth_msg.pack(fill="x", pady=(10, 0))
+        self._enable(True)
+
+    def _auth(self, mode):
+        u = self.u_var.get().strip() if hasattr(self, "u_var") else ""
+        p = self.p_var.get() if hasattr(self, "p_var") else ""
+        if not u or not p:
+            self._say(self._auth_msg, "用户名和密码都要填", BAD)
+            return
+        if mode == "register" and len(p) < 6:
+            self._say(self._auth_msg, "密码至少 6 位", BAD)
+            return
+
+        self._say(self._auth_msg, "连接服务器中…", MUTED)
+        self._enable(False)
+
+        def done(user):
+            self.app._log(f"[云同步] 已{'注册并登录' if mode == 'register' else '登录'}"
+                          f"：@{user.get('username')}")
+            self._refresh_account()
+            self._say(self._auth_msg,
+                      f"✓ 已登录 @{user.get('username')}", OK)
+            self.app._render_account()
+            self._update_local_meta()
+
+        def run():
+            if mode == "register":
+                return self.cloud.register(u, p)
+            return self.cloud.login(u, p)
+
+        self._bg(run, done)
+
+    def _logout(self):
+        self.cloud.logout()
+        self.app._log("[云同步] 已退出登录")
+        self.remote_mods = []
+        self.missing = []
+        self._set_diff("")
+        self.sync_meta.configure(text="")
+        self._refresh_account()
+        self.app._render_account()
+        self._update_local_meta()
+
+    def _toggle_public(self):
+        want = self.pub_var.get()
+
+        def done(user):
+            self._say(self._auth_msg,
+                      "✓ 已设为公开，别人可以搜到你" if want else "✓ 已设为私密",
+                      OK)
+
+        self._bg(lambda: self.cloud.set_public(want), done)
+
+    # -------------------------------------------------- 同步
+    def _render_acct_info(self):
+        if not getattr(self, "acct_info", None):
+            return
+        u = self.cloud.user or {}
+        self.acct_info.configure(
+            text=f"云端 {u.get('mod_count', 0)} 个 Mod　·　"
+                 f"{cloudmod.ago(u.get('updated_at', ''))}")
+
+    def _update_local_meta(self):
+        self._render_acct_info()
+        n = len(cloudmod.local_mods())
+        if not self.cloud.logged_in:
+            self.sync_meta.configure(text=f"本机已装 {n} 个 Mod。登录后可以把这份清单存到云端。")
+            self.btn_push.configure(state="disabled")
+            self.btn_pull.configure(state="disabled")
+            self.btn_fill.configure(state="disabled")
+            return
+
+        self.btn_push.configure(state="normal")
+        self.btn_pull.configure(state="normal")
+        u = self.cloud.user or {}
+        cnt = u.get("mod_count", 0)
+        when = cloudmod.ago(u.get("updated_at", ""))
+        self.sync_meta.configure(
+            text=f"本机已装 {n} 个 Mod　·　云端 {cnt} 个（{when}）")
+
+    def _push(self):
+        if not self.cloud.logged_in:
+            self._say(self.msg_me, "请先登录", BAD)
+            return
+        mods = cloudmod.local_mods()
+        if not mods:
+            self._say(self.msg_me, "本机还没有安装记录，先在主界面装几个 Mod 吧", WARN)
+            return
+
+        self._say(self.msg_me, f"正在上传 {len(mods)} 个 Mod…", MUTED)
+        self._enable(False)
+
+        def done(d):
+            n = d.get("count", 0)
+            self.app._log(f"[云同步] 已上传 {n} 个 Mod 到云端")
+            self._say(self.msg_me, f"✓ 已上传 {n} 个 Mod（{d.get('updated_at','')}）", OK)
+            self.cloud.user["mod_count"] = n
+            self.cloud.user["updated_at"] = d.get("updated_at", "")
+            self._update_local_meta()
+            self._enable(True)
+
+        self._bg(lambda: self.cloud.push(mods), done)
+
+    def _pull(self):
+        if not self.cloud.logged_in:
+            self._say(self.msg_me, "请先登录", BAD)
+            return
+        self._say(self.msg_me, "正在拉取云端列表…", MUTED)
+        self._enable(False)
+
+        def done(d):
+            remote = d.get("mods", [])
+            local = cloudmod.local_mods()
+            missing, extra, older = cloudmod.diff(remote, local)
+            self.remote_mods = remote
+            self.missing = missing
+
+            lines = []
+            if not remote:
+                lines.append("云端还没有列表。先点「↑ 上传到云端」把现在的配置存上去。")
+            else:
+                lines.append(f"云端 {len(remote)} 个　本机 {len(local)} 个")
+                if missing:
+                    lines.append(f"\n云端有、本机没有（{len(missing)}）：")
+                    lines.extend("  · " + m["full_name"] for m in missing[:10])
+                    if len(missing) > 10:
+                        lines.append(f"  … 还有 {len(missing) - 10} 个")
+                if older:
+                    lines.append(f"\n版本不一致（{len(older)}）：")
+                    lines.extend(f"  · {o['full_name']} 云端 {o['remote']} / 本机 {o['local']}"
+                                 for o in older[:6])
+                if extra:
+                    lines.append(f"\n本机多出来的（{len(extra)}）：")
+                    lines.extend("  · " + m["full_name"] for m in extra[:6])
+                if not (missing or older):
+                    lines.append("\n两边完全一致，不用动。")
+
+            self._set_diff("\n".join(lines))
+            self.cloud.user["mod_count"] = len(remote)
+            self.cloud.user["updated_at"] = d.get("updated_at", "")
+            self._update_local_meta()
+            self.btn_fill.configure(state="normal" if missing else "disabled")
+            self._say(self.msg_me, f"✓ 已对比（{d.get('updated_at','')}）", OK)
+            self.app._log(f"[云同步] 对比完成：云端 {len(remote)} / 本机 {len(local)}，"
+                          f"缺 {len(missing)}")
+            self._enable(True)
+
+        self._bg(self.cloud.pull, done)
+
+    def _install_missing(self):
+        if not self.missing:
+            return
+        names = [m["full_name"] for m in self.missing]
+        self.close()
+        self.app._run_install(names, f"从云端补装 {len(names)} 个 Mod")
+
+    # -------------------------------------------------- 找玩家
+    def _search(self):
+        if not self.cloud.logged_in:
+            self._say(self.msg_find, "请先登录", BAD)
+            return
+        q = self.q_var.get().strip()
+        self._say(self.msg_find, "搜索中…", MUTED)
+        self._enable(False)
+
+        def done(d):
+            users = d.get("users", [])
+            self.users = users
+            self.utree.delete(*self.utree.get_children())
+            for u in users:
+                self.utree.insert(
+                    "", "end", iid=u["username"],
+                    values=(f"@{u['username']}", u.get("mod_count", 0),
+                            cloudmod.ago(u.get("updated_at", ""))))
+            if not users:
+                self._say(self.msg_find, "没找到匹配的玩家。换个关键词，或者让对方先上传一次列表。", WARN)
+            else:
+                self._say(self.msg_find, f"✓ 找到 {len(users)} 个玩家，点一行看 TA 的 Mod", OK)
+            self._enable(True)
+
+        self._bg(lambda: self.cloud.search(q), done)
+
+    def _pick_user(self):
+        sel = self.utree.selection()
+        if not sel:
+            return
+        name = sel[0]
+        self.other_user = name
+        self.other_title.configure(text=f"@{name} 的 Mod 列表")
+        self.mtree.delete(*self.mtree.get_children())
+        self.btn_use.configure(state="disabled")
+        self.btn_pick.configure(state="disabled")
+        self._say(self.msg_find, "读取中…", MUTED)
+
+        def done(d):
+            mods = d.get("mods", [])
+            self.other_mods = mods
+            for m in mods:
+                self.mtree.insert("", "end", iid=m["full_name"],
+                                  values=(m.get("name") or m["full_name"],
+                                          m.get("version", "")))
+            self.btn_use.configure(state="normal" if mods else "disabled")
+            self.btn_pick.configure(state="normal" if mods else "disabled")
+            note = d.get("note") or ""
+            self._say(self.msg_find,
+                      f"✓ @{name} 有 {len(mods)} 个 Mod" + (f"　备注：{note}" if note else ""),
+                      OK)
+
+        self._bg(lambda: self.cloud.view(name), done)
+
+    def _install_other(self):
+        if not self.other_mods:
+            return
+        names = [m["full_name"] for m in self.other_mods]
+        user = self.other_user
+        self.close()
+        self.app._run_install(names, f"安装 @{user} 的 {len(names)} 个 Mod")
+
+    def _install_other_picked(self):
+        sel = self.mtree.selection()
+        if not sel:
+            self._say(self.msg_find, "先在上面选中几个 Mod", WARN)
+            return
+        names = list(sel)
+        user = self.other_user
+        self.close()
+        self.app._run_install(names, f"安装 @{user} 选中的 {len(names)} 个 Mod")
 
 
 def main():

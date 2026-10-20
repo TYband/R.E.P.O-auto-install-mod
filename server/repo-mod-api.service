@@ -1,0 +1,26 @@
+[Unit]
+Description=R.E.P.O. Mod cloud sync API
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/repo-mod-api
+Environment="REPO_DB=/opt/repo-mod-api/data/app.db"
+Environment="PYTHONUNBUFFERED=1"
+ExecStart=/opt/repo-mod-api/venv/bin/uvicorn app:app --host 127.0.0.1 --port 8000 --workers 1 --proxy-headers
+Restart=always
+RestartSec=3
+StandardOutput=append:/var/log/repo-mod-api.log
+StandardError=append:/var/log/repo-mod-api.log
+
+# 基本加固：服务只需要读写自己的目录
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/opt/repo-mod-api /var/log
+
+[Install]
+WantedBy=multi-user.target
