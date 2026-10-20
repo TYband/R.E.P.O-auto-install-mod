@@ -183,6 +183,10 @@ class App:
         ttk.Checkbutton(act, text="强制重装 BepInEx", variable=self.force_bep).pack(
             side="right")
 
+        self.auto_dep = tk.BooleanVar(value=True)
+        ttk.Checkbutton(act, text="自动补齐缺失依赖", variable=self.auto_dep).pack(
+            side="right", padx=(0, 12))
+
         # ===== 日志 =====
         logf = ttk.LabelFrame(self.root, text=" ③ 运行日志 ", padding=8)
         logf.pack(fill="both", expand=False, padx=12, pady=(6, 12))
@@ -247,7 +251,7 @@ class App:
         self.local_var.set(str(self.local_dir))
         if pkgs:
             self.local_hint.configure(
-                text=f"共 {len(pkgs)} 个包（含 BepInEx {n_be} 个）· 离线安装，不联网")
+                text=f"共 {len(pkgs)} 个包（含 BepInEx {n_be} 个）· 依赖可自动补齐")
         else:
             self.local_hint.configure(text="这个文件夹里没有找到 作者-Mod名-版本.zip 格式的包")
 
@@ -291,6 +295,8 @@ class App:
                     self.local_dir, self.game_dir,
                     force_bepinex=self.force_bep.get(),
                     backup=self.cfg.get("backup_before_install", True),
+                    auto_fetch_deps=self.auto_dep.get(),
+                    proxy=self.cfg.get("proxy", ""),
                     log=self._log,
                 )
                 self._log("=" * 60)

@@ -42,6 +42,7 @@
 - **自动定位游戏** —— 读注册表 + 解析 Steam 的 `libraryfolders.vdf`，多硬盘 Steam 库也能找到
 - **自动装 BepInEx** —— 首次安装自动铺好前置框架，已装则跳过（不会覆盖你的配置）
 - **依赖递归解析** —— 自动补齐 REPOLib / MenuLib 之类的依赖，版本冲突取最高
+- **离线也补依赖** —— 本地安装时若发现缺依赖，勾选后自动联网下载，并**存回 `mods/`**，下次断网也能用
 - **结构智能识别** —— 按包内实际结构决定落点，`plugins/`、`Plugins/`、`patchers/`、自带 `BepInEx/` 都能正确归类
 - **离线安装** —— `mods/` 目录放好 zip，网吧不联网也能装
 - **在线安装** —— 界面直接浏览 Thunderstore 全部 6500+ Mod，搜名字勾选即可
@@ -81,6 +82,64 @@ python mod_installer.py
 
 ---
 
+## 依赖是怎么自动解决的
+
+Thunderstore 上每个 Mod 的 `manifest.json` 里都有 `dependencies` 字段，形如：
+
+```json
+{
+  "name": "MoreShopItems_Updated",
+  "version_number": "4.2.2",
+  "dependencies": [
+    "BepInEx-BepInExPack-5.4.2305",
+    "HeroHanex-NoItemSpawnLimit-1.0.8"
+  ]
+}
+```
+
+工具就靠这个字段做**递归依赖闭包**——装 A 需要 B，装 B 又需要 C，会一路挖到底：
+
+```
+你装 MoreHead
+  ↳ YMC_MHZ-MoreHead v1.4.5
+    ↳ nickklmao-MenuLib v2.5.2      ← 自动补
+    ↳ BepInEx-BepInExPack v5.4.2305 ← 自动补
+```
+
+**版本冲突**：同一个包被多个 Mod 要求不同版本时，取版本号最大的那个。例如一个要 `BepInEx 5.4.2100`、另一个要 `5.4.2305`，最终装 `5.4.2305`，日志会标出升级过程：
+
+```
+↑ BepInEx-BepInExPack 版本升级 5.4.2100 → 5.4.2305
+```
+
+### 三种安装方式下的行为
+
+| 方式 | 依赖处理 |
+|---|---|
+| **在线安装**（界面勾选） | 自动解析 + 自动下载，无需干预 |
+| **离线安装 + 勾选「自动补齐缺失依赖」** | 先装本地包，缺的依赖联网下载，**并保存进 `mods/`** |
+| **离线安装 + 不勾选**（真断网） | 只列出缺哪些，不阻断安装 |
+
+### 为什么要把依赖存回 `mods/`
+
+你在家手动从官网下了一个新 Mod 丢进 `mods/`，它可能依赖 3 个别的包。第一次安装时工具联网补齐，同时把这 3 个 zip 也存进 `mods/`。
+
+于是这个文件夹从此就是**自包含**的了——拷到网吧断网也能一次装完，不用再补。
+
+日志里能清楚看到：
+
+```
+检查依赖关系…
+缺失 → HeroHanex-NoItemSpawnLimit v1.0.8
+发现 1 个缺失依赖，开始下载…
+  下载 HeroHanex-NoItemSpawnLimit v1.0.8 … 完成 (0.03 MB)
+  已存入本地包目录: HeroHanex-NoItemSpawnLimit-1.0.8.zip
+[11/11] (依赖) HeroHanex-NoItemSpawnLimit v1.0.8
+  已安装 1 个文件
+```
+
+---
+
 ## 界面说明
 
 | 区域 | 说明 |
@@ -92,12 +151,13 @@ python mod_installer.py
 
 | 按钮 | 作用 |
 |---|---|
-| ⚡ 一键离线安装 | 装 `mods/` 里的全部包（不联网） |
+| ⚡ 一键离线安装 | 装 `mods/` 里的全部包（缺依赖时按勾选自动补齐） |
 | 安装勾选的 Mod | 装列表里勾选的（联网，自动补依赖） |
 | 一键安装我的配置 | 装 `config.json` 中 `auto_install_list` 定义的整套 |
 | 卸载选中 | 按安装记录精确删除 |
 | 清理下载缓存 | 清空 `data/cache/` |
 | 强制重装 BepInEx | BepInEx 损坏或想换版本时勾选 |
+| 自动补齐缺失依赖 | 默认开启。断网时自动降级为仅提示，不会卡住 |
 
 ---
 
@@ -198,8 +258,8 @@ repo-mod-installer/
 旧版本脚本用 LF 换行导致 cmd 解析错乱，已修复为 CRLF + 纯 ASCII。若仍遇到，直接用 `build-exe.bat` 生成的 exe。
 
 **Q：日志提示某 Mod 依赖某个包，本地没有，要紧吗？**
-不要紧，只是提示。多数 Mod 缺少可选依赖也能正常运行，游戏能正常启动就不用管。
-想补齐的话用在线模式安装，会自动拉全依赖。
+这是没勾选「自动补齐缺失依赖」或处于断网状态时的提示。多数 Mod 缺可选依赖也能跑，游戏能正常启动就不用管。
+想补齐：勾上「自动补齐缺失依赖」再装一次，工具会联网下载并保存进 `mods/`，之后离线也有。
 
 **Q：支持其他游戏吗？**
 目前只针对 R.E.P.O.（AppID `3241660`）调优。核心逻辑是通用的，改 `core.py` 里的 `REPO_APPID` 和 Thunderstore 社区名，理论上可用于其他 Unity + BepInEx 的游戏，但未做验证。
@@ -244,6 +304,7 @@ Installing mods for R.E.P.O. by hand involves three tedious layers: setting up t
 - Locates the game via the Windows registry and Steam's `libraryfolders.vdf` (multi-drive libraries supported)
 - Installs BepInEx automatically, skipping it if already present
 - Resolves the dependency graph recursively, picking the highest version on conflicts
+- When installing from a local folder, missing dependencies are fetched automatically and **saved back into `mods/`**, so the folder becomes self-contained for offline use
 - Classifies each archive's layout and extracts every file to its correct destination
 - Works fully **offline** from a local `mods/` folder — ideal for internet cafés
 - Removes stale versions of the same mod (a common cause of crashes)

@@ -653,18 +653,23 @@ def scan_existing_mods(game_dir, log=None):
 
 def backup_dir_once(game_dir, log=print):
     """
-    首次安装前，把已有的 BepInEx 目录整体备份一次（只备份一次，避免重复占空间）
+    首次安装前，把已有的 BepInEx 目录整体备份一次（只备份一次，避免重复占空间）。
+
+    备份按游戏目录名隔离子文件夹，避免切换游戏时互相覆盖、或"已备份"标记误判。
     """
     if not game_dir:
         return None
-    marker = BACKUP_DIR / ".backed_up"
+    game_dir = Path(game_dir)
+    tag = game_dir.name or "game"
+    bdir = BACKUP_DIR / tag
+    marker = bdir / ".backed_up"
     if marker.exists():
         return None
     if not (game_dir / "BepInEx").exists():
         return None
 
-    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-    target = BACKUP_DIR / "BepInEx_原始备份"
+    bdir.mkdir(parents=True, exist_ok=True)
+    target = bdir / "BepInEx_原始备份"
     log(f"  备份原有 BepInEx 到 {target}")
     try:
         if target.exists():
@@ -811,14 +816,67 @@ def is_bepinex_pack(full_name):
     return "bepinexpack" in full_name.lower().replace("-", "")
 
 
+def load_index(force=False, proxy="", log=print):
+    """载入 Thunderstore 索引（优先用本地缓存）"""
+    return ModIndex(fetch_index(force=force, proxy=proxy, log=log))
+
+
+def find_missing_deps(pkgs, index, log=print):
+    """
+    计算本地包集合缺哪些依赖（递归，含依赖的依赖）。
+
+    返回 [(pkg, ver), ...]，即需要额外下载的包。
+    本地已有的包（不论版本）一律视为满足，避免重复下载。
+    """
+    have = {p["full_name"].lower() for p in pkgs}
+    needed = {}
+
+    def version_key(v):
+        nums = re.findall(r"\d+", v or "")
+        return tuple(int(n) for n in nums) if nums else (0,)
+
+    def visit(full_name, version=None, depth=0):
+        key = full_name.lower()
+        if key in have:
+            return
+        pkg, ver = index.find_version(full_name, version)
+        if not pkg or not ver:
+            log("  " * depth + f"[警告] 依赖包不存在或已下架: {full_name}")
+            return
+
+        if key in needed:
+            if version_key(ver["version_number"]) > version_key(needed[key][1]["version_number"]):
+                needed[key] = (pkg, ver)
+            return
+
+        needed[key] = (pkg, ver)
+        log("  " * depth + f"缺失 → {pkg['full_name']} v{ver['version_number']}")
+
+        for dep in ver.get("dependencies", []):
+            dn, dv = _parse_dep(dep)
+            visit(dn, dv, depth + 1)
+
+    for p in pkgs:
+        for dep in p.get("dependencies", []):
+            dn, dv = _parse_dep(dep)
+            visit(dn, dv)
+
+    return list(needed.values())
+
+
 def install_local(folder, game_dir, only=None, force_bepinex=False,
-                  backup=True, log=print):
+                  backup=True, auto_fetch_deps=False, proxy="",
+                  save_deps=True, log=print):
     """
     从本地 zip 文件夹安装。BepInEx 会排在最前面。
 
-    only: 只装这些 full_name（None = 全装）
+    only            : 只装这些 full_name（None = 全装）
+    auto_fetch_deps : 联网自动补齐缺失依赖（需要网络；离线时自动降级为仅提示）
+    save_deps       : 把下载来的依赖 zip 存回 mods/ 文件夹，下次断网也能用
+
     返回 (成功数, 失败列表)
     """
+    folder = Path(folder)
     if not game_dir:
         raise RuntimeError("未定位到游戏目录")
 
@@ -832,20 +890,58 @@ def install_local(folder, game_dir, only=None, force_bepinex=False,
         if not pkgs:
             raise RuntimeError("选中的 mod 在本地文件夹里都不存在")
 
-    # BepInEx 前置优先
-    pkgs.sort(key=lambda p: 0 if is_bepinex_pack(p["full_name"]) else 1)
-
     log(f"本地包目录: {folder}")
     log(f"找到 {len(pkgs)} 个 mod 包")
 
-    # 依赖完整性检查（本地模式只提示，不联网补）
-    have = {p["full_name"].lower() for p in pkgs}
-    for p in pkgs:
-        for dep in p.get("dependencies", []):
-            dep_name, _ = _parse_dep(dep)
-            if dep_name.lower() not in have and not is_bepinex_pack(dep_name):
-                log(f"  [备注] {p['full_name']} 声明依赖 {dep_name}，本地包里没有")
-                log("         （不影响安装，游戏能正常启动就不用管）")
+    # 统一成待安装条目
+    items = [{"full_name": p["full_name"], "version": p["version"],
+              "path": p["path"], "source": "local"} for p in pkgs]
+
+    # ---- 依赖检查与补齐 ----
+    if auto_fetch_deps:
+        log("")
+        log("检查依赖关系…")
+        try:
+            index = load_index(proxy=proxy, log=log)
+            missing = find_missing_deps(pkgs, index, log=log)
+        except Exception as e:
+            log(f"[提示] 无法联网检查依赖（{e}），本次仅安装本地包")
+            missing = []
+
+        if missing:
+            log(f"发现 {len(missing)} 个缺失依赖，开始下载…")
+            for pkg, ver in missing:
+                try:
+                    zp = download_package(pkg, ver, proxy=proxy, log=log)
+                    items.append({"full_name": pkg["full_name"],
+                                  "version": ver["version_number"],
+                                  "path": zp, "source": "dependency"})
+                    if save_deps:
+                        dst = folder / f"{pkg['full_name']}-{ver['version_number']}.zip"
+                        if not dst.exists():
+                            shutil.copy2(zp, dst)
+                            log(f"  已存入本地包目录: {dst.name}")
+                except Exception as e:
+                    log(f"  [失败] 依赖 {pkg['full_name']}: {e}")
+        else:
+            log("依赖完整，无需补装")
+    else:
+        # 不联网时，只提示缺哪些
+        have = {p["full_name"].lower() for p in pkgs}
+        reported = set()
+        for p in pkgs:
+            for dep in p.get("dependencies", []):
+                dep_name, _ = _parse_dep(dep)
+                key = dep_name.lower()
+                if key in have or key in reported or is_bepinex_pack(dep_name):
+                    continue
+                reported.add(key)
+                log(f"  [缺少依赖] {dep_name} ← 被 {p['full_name']} 需要")
+        if reported:
+            log("  → 勾选「自动补齐缺失依赖」可联网自动装好这些包")
+
+    # BepInEx 前置优先
+    items.sort(key=lambda it: 0 if is_bepinex_pack(it["full_name"]) else 1)
 
     if backup:
         backup_dir_once(game_dir, log=log)
@@ -853,10 +949,11 @@ def install_local(folder, game_dir, only=None, force_bepinex=False,
     installed_db = load_installed()
     ok, failed = 0, []
 
-    total = len(pkgs)
-    for i, p in enumerate(pkgs, 1):
-        name = p["full_name"]
-        log(f"[{i}/{total}] {name} v{p['version']}")
+    total = len(items)
+    for i, it in enumerate(items, 1):
+        name = it["full_name"]
+        tag = "依赖" if it["source"] == "dependency" else "本地"
+        log(f"[{i}/{total}] ({tag}) {name} v{it['version']}")
 
         if is_bepinex_pack(name) and is_bepinex_installed(game_dir) and not force_bepinex:
             log("  BepInEx 已存在，跳过（需要重装请勾选「强制重装 BepInEx」）")
@@ -864,13 +961,13 @@ def install_local(folder, game_dir, only=None, force_bepinex=False,
 
         try:
             fake_pkg = {"full_name": name}
-            fake_ver = {"version_number": p["version"]}
-            files = install_package(fake_pkg, fake_ver, p["path"], game_dir, log=log)
+            fake_ver = {"version_number": it["version"]}
+            files = install_package(fake_pkg, fake_ver, it["path"], game_dir, log=log)
             installed_db[name] = {
-                "version": p["version"],
+                "version": it["version"],
                 "files": files,
                 "installed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "source": "local",
+                "source": it["source"],
             }
             save_installed(installed_db)
             ok += 1
