@@ -7,6 +7,7 @@ R.E.P.O. 一键装 Mod —— 图形界面
 
 import os
 import sys
+import json
 import queue
 import hashlib
 import threading
@@ -175,6 +176,7 @@ class App:
         self.busy = False
         self.log_queue = queue.Queue()
         self.tr_queue = queue.Queue()
+        self.ui_queue = queue.Queue()
         self._hover = None
         self._base_tag = {}
         self._log_open = True
@@ -526,6 +528,12 @@ class App:
     def _log(self, msg):
         self.log_queue.put(str(msg))
 
+    def _ui(self, fn):
+        """从后台线程投递任务到主线程执行。
+        启动阶段 mainloop 还没跑起来，这时直接 root.after 会抛
+        'main thread is not in main loop'，任务就丢了。"""
+        self.ui_queue.put(fn)
+
     def _drain_log(self):
         try:
             while True:
@@ -541,6 +549,16 @@ class App:
             while True:
                 tn, td, iid = self.tr_queue.get_nowait()
                 self._apply_translation(tn, td, iid)
+        except queue.Empty:
+            pass
+        # 后台线程投递的界面任务
+        try:
+            while True:
+                fn = self.ui_queue.get_nowait()
+                try:
+                    fn()
+                except Exception as e:
+                    self._log(f"[错误] {e}")
         except queue.Empty:
             pass
         self.root.after(120, self._drain_log)
@@ -713,21 +731,27 @@ class App:
 
     # -------------------------------------------------- 索引
     def _load_index_from_cache(self):
+        data = None
         if core.INDEX_CACHE.exists():
             try:
-                import json
                 with open(core.INDEX_CACHE, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                if not core._index_is_current(data):
-                    self.count_var.set("点「刷新索引」获取带图标的 Mod 列表")
-                    return
-                self.index = core.ModIndex(data)
-                self._log(f"已载入本地索引：{len(self.index.packages)} 个 Mod")
-                self._show_popular()
-                return
             except Exception:
-                pass
-        self.count_var.set("点「刷新索引」获取 Mod 列表")
+                data = None
+
+        if data and core._index_is_current(data):
+            self.index = core.ModIndex(data)
+            self._log(f"已载入本地索引：{len(self.index.packages)} 个 Mod")
+            self._show_popular()
+            return
+
+        if data:
+            self._log("本地索引是旧格式，重新拉一份…")
+        else:
+            self._log("本地没有 Mod 索引，自动拉取…")
+        # 不再让用户自己找按钮：没有索引就直接后台拉
+        self.count_var.set("正在加载 Mod 列表…")
+        self._refresh_index()
 
     def _refresh_index(self):
         if self.busy:
@@ -740,11 +764,12 @@ class App:
                 pkgs = core.fetch_index(force=True, proxy=self.cfg.get("proxy", ""),
                                         log=self._log)
                 self.index = core.ModIndex(pkgs)
-                self.root.after(0, lambda: self._show_popular())
+                self._ui(self._show_popular)
             except Exception as e:
-                self._log(f"[错误] {e}")
+                self._log(f"[错误] 索引加载失败：{e}")
+                self._ui(lambda: self.count_var.set("索引加载失败，点「刷新」重试"))
             finally:
-                self.root.after(0, lambda: self._set_busy(False))
+                self._ui(lambda: self._set_busy(False))
 
         threading.Thread(target=work, daemon=True).start()
 

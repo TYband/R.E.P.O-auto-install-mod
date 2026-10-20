@@ -64,7 +64,17 @@
 ### 方式一：用打包好的 EXE（网吧推荐）
 
 在任意有 Python 的电脑上双击 `build-exe.bat`，得到 `dist/REPO-Mod-Installer.exe`。  
-Mod 包会被打进 exe 内部，**拷这一个文件就能用，目标机器不需要装 Python**。
+Mod 包和 Mod 列表索引都打在 exe 内部，**拷这一个文件就能用，目标机器不需要装 Python**。
+
+exe 第一次运行会在自己旁边释放出三样东西：
+
+| 释放出来的      | 用途                          |
+| ---------- | --------------------------- |
+| `config.json` | 配置（要改代理就改这个）                |
+| `mods\`       | 内置的离线包，也可以往里面丢自己的 zip       |
+| `data\`       | 索引缓存、图标缓存、安装记录              |
+
+> **为什么索引要打进 exe**：早期版本只打了 mod 包，exe 拷到新机器上 `data\` 是空的，界面就是一张空列表——Thunderstore 在国内还经常连不上，看起来就像工具坏了。现在索引（6522 个包，gzip 后 2.5 MB）跟着 exe 走，第一次打开就有完整列表，联网时再自动更新。
 
 ### 方式二：源码运行
 
@@ -258,6 +268,7 @@ Thunderstore 上每个 Mod 的 `manifest.json` 里都有 `dependencies` 字段�
 repo-mod-installer/
 ├── 启动.bat               # 双击启动（自动挑选可用 Python）
 ├── build-exe.bat          # 打包成免 Python 的 exe
+├── make_seed.py           # 打包前把索引压成种子塞进 exe
 ├── mod_installer.py       # 图形界面（Tkinter）
 ├── core.py                # 核心逻辑：定位/解析/解包/安装
 ├── config.example.json    # 配置模板
@@ -293,6 +304,10 @@ repo-mod-installer/
 
 **Q：双击 `启动.bat` 报一堆 `'xx' 不是内部或外部命令`？**  
 旧版本脚本用 LF 换行导致 cmd 解析错乱，已修复为 CRLF + 纯 ASCII。若仍遇到，直接用 `build-exe.bat` 生成的 exe。
+
+**Q：打包成 exe 后打开是空列表 / 一直显示「正在加载」？**  
+旧版 exe 没有把索引打进去，新机器上 `data\` 是空的，又碰上 Thunderstore 连不上，就一直是空列表。重新跑一次 `build-exe.bat`（现在会用 `make_seed.py` 把索引压进 exe），第一次打开就有 6522 个 Mod。  
+如果还是空的，看日志里的报错：网络不通就在 `config.json` 填 `proxy`，然后点「刷新」。
 
 **Q：点了「翻译」没反应 / 提示翻译失败？**  
 名字是本地词表翻的，不会失败；失败的只会是简介，说明两个免费接口都连不上。在 `config.json` 里填 `"proxy": "http://127.0.0.1:7897"`（改成你自己的代理端口）再点一次即可。日志里会写明走了哪个接口。
@@ -363,7 +378,7 @@ pip install -r requirements.txt
 python mod_installer.py
 ```
 
-Or run `build-exe.bat` once on a machine with Python to produce a standalone `REPO-Mod-Installer.exe` with the mod packages bundled inside — then just copy that single file to a USB drive.
+Or run `build-exe.bat` once on a machine with Python to produce a standalone `REPO-Mod-Installer.exe` with the mod packages **and the mod-list index** bundled inside — then just copy that single file to a USB drive. On first launch it writes `config.json`, `mods\` and `data\` next to itself, so the mod list is populated immediately even without internet.
 
 Requires Windows and Python 3.8+ (with tkinter). Only R.E.P.O. is officially supported.
 

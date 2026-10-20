@@ -57,6 +57,50 @@ if getattr(sys, "frozen", False):
         except Exception:
             pass
 
+
+def _release_bundled_assets():
+    """
+    打包成 exe 后，把内置的索引种子和 mod 包释放到 exe 旁边。
+
+    不释放的话，exe 第一次运行 data/ 是空的 —— 界面没有 Mod 列表，
+    而且 Thunderstore 在国内经常连不上，用户会以为工具坏了。
+    """
+    if not getattr(sys, "frozen", False):
+        return
+    meipass = Path(getattr(sys, "_MEIPASS", str(BASE_DIR)))
+
+    # 1) 索引种子 → data/index.json（只在没有缓存时放一次）
+    if not INDEX_CACHE.exists():
+        for name in ("index.json.gz", "index.json"):
+            src = meipass / "seed" / name
+            if not src.exists():
+                continue
+            try:
+                DATA_DIR.mkdir(parents=True, exist_ok=True)
+                if name.endswith(".gz"):
+                    import gzip
+                    with gzip.open(src, "rb") as fi, open(INDEX_CACHE, "wb") as fo:
+                        shutil.copyfileobj(fi, fo)
+                else:
+                    shutil.copy2(src, INDEX_CACHE)
+                break
+            except Exception:
+                pass
+
+    # 2) 内置 mods → exe 旁边的 mods/（要往里面加包，必须落在可写目录）
+    bundled_mods = meipass / "mods"
+    target = BASE_DIR / "mods"
+    if bundled_mods.exists() and not target.exists():
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            for z in bundled_mods.glob("*.zip"):
+                shutil.copy2(z, target / z.name)
+        except Exception:
+            pass
+
+
+_release_bundled_assets()
+
 # Thunderstore 包根目录下的元数据文件，不需要复制进游戏
 META_FILES = {"manifest.json", "icon.png", "readme.md", "changelog.md",
               "license.txt", "license", "icon.jpg"}
@@ -302,9 +346,21 @@ def fetch_index(force=False, proxy="", log=print):
 
     log("正在从 Thunderstore 下载 mod 索引，首次需要一会儿…")
     s = _session(proxy)
-    resp = s.get(INDEX_URL, timeout=120)
-    resp.raise_for_status()
-    raw = resp.json()
+    try:
+        resp = s.get(INDEX_URL, timeout=120)
+        resp.raise_for_status()
+        raw = resp.json()
+    except Exception as e:
+        # 下载失败时退回旧缓存，总比列表空白强
+        if INDEX_CACHE.exists():
+            try:
+                with open(INDEX_CACHE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                log(f"[警告] 索引下载失败（{type(e).__name__}），改用本地旧索引")
+                return data
+            except Exception:
+                pass
+        raise
 
     slim = [_slim_package(p) for p in raw]
     slim.sort(key=lambda p: p["full_name"].lower())
@@ -1002,14 +1058,14 @@ def install_local(folder, game_dir, only=None, force_bepinex=False,
 def default_local_dir():
     """
     找工具自带的 mods 文件夹。
-    打包成 exe 时 mods 会被塞进 exe 内部，运行时解压到 _MEIPASS，所以两处都要看。
+    打包成 exe 时 mods 会被塞进 exe 内部，运行时先释放到 exe 旁边，
+    所以优先看 exe 旁边（可写，能继续往里加包），没有再退回 _MEIPASS。
     """
-    candidates = []
+    candidates = [BASE_DIR / "mods"]
     if getattr(sys, "frozen", False):
         meipass = getattr(sys, "_MEIPASS", None)
         if meipass:
             candidates.append(Path(meipass) / "mods")
-    candidates.append(BASE_DIR / "mods")
 
     for d in candidates:
         if d.exists() and any(d.glob("*.zip")):

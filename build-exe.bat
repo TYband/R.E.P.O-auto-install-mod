@@ -25,13 +25,16 @@ goto nopython
 echo Using Python: %PY%
 echo(
 
-echo [1/3] Installing pyinstaller ...
+echo [1/4] Installing pyinstaller ...
 %PY% -m pip install --quiet --upgrade pyinstaller
 
-echo [2/3] Building EXE (mods are packed inside) ...
-%PY% -m PyInstaller --noconfirm --onefile --noconsole --name REPO-Mod-Installer --add-data "config.json;." --add-data "mods;mods" mod_installer.py
+echo [2/4] Packing the mod index into the EXE ...
+%PY% make_seed.py
 
-echo [3/3] Done.
+echo [3/4] Building EXE (mods + index are packed inside) ...
+%PY% -m PyInstaller --noconfirm --onefile --noconsole --name REPO-Mod-Installer --add-data "config.json;." --add-data "mods;mods" --add-data "build/seed/index.json.gz;seed" mod_installer.py
+
+echo [4/4] Done.
 echo(
 if exist "dist\REPO-Mod-Installer.exe" goto ok
 echo [ERROR] Build failed. Check the messages above.
@@ -42,11 +45,13 @@ goto end
 echo   Output:  dist\REPO-Mod-Installer.exe
 echo(
 echo   Copy that single EXE to your USB drive. The mod packages
-echo   are packed inside it, so nothing else is required.
+echo   and the mod list index are packed inside it, so the list
+echo   shows up on the first run even without internet.
 echo(
-echo   Optional: also copy the "data" folder next to the EXE to
-echo   keep the online mod index cache (bigger, but lets you
-echo   browse the online list without downloading it again).
+echo   On first launch the EXE writes these next to itself:
+echo     config.json   - settings (edit proxy here if needed)
+echo     mods\         - offline mod packages, add your own zips
+echo     data\         - index cache, icons, install records
 echo(
 pause
 goto end
