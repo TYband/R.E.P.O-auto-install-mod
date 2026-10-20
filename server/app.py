@@ -277,7 +277,7 @@ def health():
 
 @app.post("/api/register")
 def register(body: AuthIn, request: Request):
-    rate_limit(f"reg:{request.client.host}", 8, 3600)
+    rate_limit(f"reg:{request.client.host}", 12, 3600)
 
     name = body.username.strip()
     if not USERNAME_RE.match(name):
@@ -303,7 +303,7 @@ def register(body: AuthIn, request: Request):
 
 @app.post("/api/login")
 def login(body: AuthIn, request: Request):
-    rate_limit(f"login:{request.client.host}", 20, 3600)
+    rate_limit(f"login:{request.client.host}", 60, 3600)
 
     with db() as c:
         row = c.execute("SELECT * FROM users WHERE username = ?",
@@ -319,6 +319,16 @@ def login(body: AuthIn, request: Request):
                   "VALUES (?,?,?,?)", (token, row["id"], now_iso(), now_iso()))
         c.execute("UPDATE users SET last_login = ? WHERE id = ?",
                   (now_iso(), row["id"]))
+        # 每个账号只留最近 10 个令牌，其余清掉；顺手清过期的
+        c.execute("DELETE FROM tokens WHERE user_id = ? AND token NOT IN "
+                  "(SELECT token FROM tokens WHERE user_id = ? "
+                  " ORDER BY created_at DESC LIMIT 10)",
+                  (row["id"], row["id"]))
+        # 每个账号只留最近 10 个令牌，其余清掉；顺手清过期的
+        c.execute("DELETE FROM tokens WHERE user_id = ? AND token NOT IN "
+                  "(SELECT token FROM tokens WHERE user_id = ? "
+                  " ORDER BY created_at DESC LIMIT 10)",
+                  (row["id"], row["id"]))
         ml = c.execute("SELECT mod_count, updated_at FROM modlists "
                        "WHERE user_id = ?", (row["id"],)).fetchone()
 

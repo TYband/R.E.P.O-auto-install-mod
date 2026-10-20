@@ -67,7 +67,8 @@ sqlite3 /opt/repo-mod-api/data/app.db "delete from users where username='xxx';"
 
 - 密码：PBKDF2-HMAC-SHA256，20 万轮，每个账号独立盐
 - 令牌：32 字节随机串，存库可吊销，180 天不用自动失效
-- 限流：注册 8 次/小时/IP，登录 20 次/小时/IP
+- 限流：注册 12 次/小时/IP，登录 60 次/小时/IP（网吧/宿舍常共用出口 IP，登录放宽了些）
+- 令牌：每个账号只保留最近 10 个，多的自动清掉
 - 服务只监听 `127.0.0.1`，对外只经 nginx
 - 当前是 **HTTP**，密码在网络上是明文传输的。要长期公开使用，建议加一层
   TLS（`certbot --nginx` 或 Cloudflare 代理）
