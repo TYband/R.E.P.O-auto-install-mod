@@ -174,15 +174,24 @@ class App:
         self.selected = set()
         self.busy = False
         self.log_queue = queue.Queue()
+        self.tr_queue = queue.Queue()
         self._hover = None
         self._base_tag = {}
         self._log_open = True
+        self._tr_on = False
+        self._raw_name = ""
 
         self._setup_style()
         self._build()
         self._fit_window()
 
         self.icons = IconCache(root, log=self._log)
+
+        # 后台探一下 Google 翻译通不通，通了就优先用它（译文比 MyMemory 顺）
+        threading.Thread(
+            target=core.probe_translation,
+            kwargs={"proxy": (self.cfg.get("proxy") or "").strip()},
+            daemon=True).start()
         self._init_local_dir()
         self._detect_game()
         self._load_index_from_cache()
@@ -414,9 +423,15 @@ class App:
         self.d_icon = tk.Label(pad, bg=CARD)
         self.d_icon.pack(anchor="w")
 
-        self.d_name = tk.Label(pad, text="", bg=CARD, fg=TEXT, font=(F, 12, "bold"),
-                               anchor="w", justify="left", wraplength=300)
-        self.d_name.pack(fill="x", pady=(10, 2))
+        self.name_row = tk.Frame(pad, bg=CARD)
+        self.name_row.pack(fill="x", pady=(10, 2))
+        self.d_name = tk.Label(self.name_row, text="", bg=CARD, fg=TEXT,
+                               font=(F, 12, "bold"), anchor="w", justify="left",
+                               wraplength=250)
+        self.d_name.pack(side="left", fill="x", expand=True)
+        self.btn_trans = ttk.Button(self.name_row, text="翻译", style="Mini.TButton",
+                                    command=self._translate_detail)
+        self.btn_trans.pack(side="right", anchor="n", padx=(6, 0))
 
         self.d_meta = tk.Label(pad, text="", bg=CARD, fg=MUTED, font=(F, 9),
                                anchor="w", justify="left", wraplength=300)
@@ -519,6 +534,13 @@ class App:
                 self.log.insert("end", msg + "\n")
                 self.log.see("end")
                 self.log.configure(state="disabled")
+        except queue.Empty:
+            pass
+        # 后台线程的翻译结果也在这里落地，避免跨线程操作 Tk
+        try:
+            while True:
+                tn, td, iid = self.tr_queue.get_nowait()
+                self._apply_translation(tn, td, iid)
         except queue.Empty:
             pass
         self.root.after(120, self._drain_log)
@@ -837,6 +859,8 @@ class App:
         self.d_desc.configure(text="")
         self.d_deps.configure(text="")
         self.btn_detail_install.configure(state="disabled")
+        self.btn_trans.configure(text="翻译", state="disabled")
+        self._tr_on = False
 
     def _current_pkg(self):
         sel = self.tree.selection()
@@ -857,7 +881,10 @@ class App:
         db = core.load_installed()
         inst = next((v for k, v in db.items() if k.lower() == name.lower()), None)
 
-        self.d_name.configure(text=pkg.get("name") or name, fg=TEXT)
+        self._tr_on = False
+        self._raw_name = pkg.get("name") or name
+        self.d_name.configure(text=self._raw_name, fg=TEXT)
+        self.btn_trans.configure(text="翻译", state="normal")
 
         bits = [pkg.get("owner") or "", f"v{latest['version_number']}",
                 f"↓ {self._fmt_dl(latest.get('downloads'))}"]
@@ -891,6 +918,50 @@ class App:
         if icon_url:
             self.icons.get(icon_url, 112,
                            lambda photo: self._set_detail_icon(photo))
+
+    # -------------------------------------------------- 翻译
+    def _translate_detail(self):
+        pkg, latest = self._current_pkg()
+        if not pkg:
+            return
+        if self._tr_on:                      # 已经翻过 → 还原原文
+            self._show_detail()
+            return
+
+        name = pkg.get("name") or pkg["full_name"]
+        desc = (latest.get("description") or "").strip()[:480]
+        proxy = (self.cfg.get("proxy") or "").strip()
+
+        self.btn_trans.configure(text="翻译中…", state="disabled")
+        self._log(f"翻译 {name} …")
+
+        def work():
+            try:
+                tn, td = core.translate_package(name, desc, proxy=proxy, log=self._log)
+            except Exception as e:
+                self._log(f"[错误] 翻译失败：{e}")
+                tn, td = "", ""
+            # 不直接碰 Tk，交给主线程的队列处理（跨线程调 Tk 会偶发崩）
+            self.tr_queue.put((tn, td, pkg["full_name"]))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _apply_translation(self, tn, td, iid):
+        # 翻译期间用户可能已经点了别的 Mod，别把结果写到错误的详情里
+        sel = self.tree.selection()
+        if not sel or sel[0] != iid:
+            return
+        if not tn and not td:
+            self.btn_trans.configure(text="翻译", state="normal")
+            self._log("翻译失败：免费翻译源都连不上。可在 config.json 填 proxy"
+                      "（如 http://127.0.0.1:7897）后重试")
+            return
+        if tn:
+            self.d_name.configure(text=f"{tn}（{self._raw_name}）")
+        if td:
+            self.d_desc.configure(text=td[:400])
+        self.btn_trans.configure(text="还原", state="normal")
+        self._tr_on = True
 
     def _set_detail_icon(self, photo):
         if photo:

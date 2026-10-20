@@ -17,6 +17,7 @@ import re
 import sys
 import json
 import time
+import html
 import shutil
 import zipfile
 import tempfile
@@ -1073,3 +1074,259 @@ def check_dependencies():
             "缺少 requests 库。请在命令行运行：\n    pip install requests\n"
             "或者直接运行 启动.bat（会自动安装）"
         )
+
+
+# ============================================================
+# 翻译（免费源，不需要 API Key）
+# ============================================================
+
+TRANS_CACHE_PATH = DATA_DIR / "translate_cache.json"
+TRANS_CACHE_MAX = 3000          # 缓存条数上限，超了丢最旧的
+
+_trans_mem = None               # 内存缓存，避免每次点都读盘
+
+
+def _load_trans_cache():
+    global _trans_mem
+    if _trans_mem is not None:
+        return _trans_mem
+    data = {}
+    try:
+        if TRANS_CACHE_PATH.exists():
+            with open(TRANS_CACHE_PATH, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            if isinstance(raw, dict):
+                data = raw
+    except Exception:
+        data = {}
+    _trans_mem = data
+    return data
+
+
+def _save_trans_cache(cache):
+    global _trans_mem
+    _trans_mem = cache
+    try:
+        if len(cache) > TRANS_CACHE_MAX:
+            for k in list(cache.keys())[:len(cache) - TRANS_CACHE_MAX]:
+                cache.pop(k, None)
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        with open(TRANS_CACHE_PATH, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def _tr_google(text, target, proxy, timeout=8):
+    """Google 翻译的免费网页接口（client=gtx），无需 Key"""
+    r = _session(proxy).get(
+        "https://translate.googleapis.com/translate_a/single",
+        params={"client": "gtx", "sl": "auto", "tl": target, "dt": "t", "q": text},
+        timeout=timeout,
+    )
+    r.raise_for_status()
+    data = r.json()
+    out = "".join(seg[0] for seg in data[0] if seg and seg[0])
+    return out.strip()
+
+
+def _tr_mymemory(text, target, proxy, timeout=8):
+    """MyMemory 免费接口，匿名每天 5000 字符，国内可直连"""
+    r = _session(proxy).get(
+        "https://api.mymemory.translated.net/get",
+        params={"q": text[:480], "langpair": f"en|{target}"},
+        timeout=timeout,
+    )
+    r.raise_for_status()
+    d = r.json()
+    out = ((d.get("responseData") or {}).get("translatedText") or "").strip()
+    if not out or "MYMEMORY WARNING" in out.upper() or "QUOTA" in out.upper():
+        raise RuntimeError("免费额度用尽或返回异常")
+    return html.unescape(out)
+
+
+TRANS_PROVIDERS = [("google", _tr_google), ("mymemory", _tr_mymemory)]
+
+_GOOGLE_OK = None               # 启动时探测结果，None = 还没测
+_AUTO_PROXY = ""                # 探测到的本机代理，仅用于翻译
+
+# 常见本地代理端口（Clash / V2Ray / Shadowsocks）
+_LOCAL_PROXY_PORTS = ("7897", "7890", "10809", "10808", "1080")
+
+# 这些是专有名词，拆开反而翻不出来（BepInExPack 不能变成 Bep In Ex Pack）
+_TRANS_KEEP = ("bepinex", "repolib", "menulib", "lethallib", "xunity",
+               "autotranslator")
+
+
+def probe_translation(proxy="", log=None):
+    """
+    后台探一下 Google 能不能连上，能连就优先用它（译文质量比 MyMemory 好）。
+    没配代理时顺手试试本机常见代理端口，通了就自动借用，只影响翻译。
+    """
+    global _GOOGLE_OK, _AUTO_PROXY
+    if _GOOGLE_OK is not None:
+        return _GOOGLE_OK
+
+    if proxy:
+        try:
+            _tr_google("hello", "zh-CN", proxy, timeout=3)
+            _GOOGLE_OK, _AUTO_PROXY = True, proxy
+            return True
+        except Exception:
+            pass
+    else:
+        try:
+            _tr_google("hello", "zh-CN", "", timeout=3)
+            _GOOGLE_OK = True
+            return True
+        except Exception:
+            pass
+        for port in _LOCAL_PROXY_PORTS:
+            p = f"http://127.0.0.1:{port}"
+            try:
+                _tr_google("hello", "zh-CN", p, timeout=3)
+                _GOOGLE_OK, _AUTO_PROXY = True, p
+                if log:
+                    log(f"翻译：检测到本机代理 {p}，走 Google（译文更准）")
+                return True
+            except Exception:
+                continue
+
+    _GOOGLE_OK = False
+    if log:
+        log("翻译：Google 连不上，改用 MyMemory 免费接口")
+    return False
+
+
+def humanize_name(text):
+    """
+    把 MoreShopItems_Updated 这种标识符拆成可翻译的自然短语。
+    专有名词（BepInEx / REPOLib / MenuLib）保持原样。
+    """
+    text = re.sub(r"[_\-]+", " ", text or "").strip()
+    out = []
+    for word in text.split():
+        low = word.lower()
+        if len(word) >= 8 and not any(k in low for k in _TRANS_KEEP):
+            word = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", word)
+        out.append(word)
+    return re.sub(r"\s+", " ", " ".join(out)).strip()
+
+
+# Mod 名常用词表：整句都是这些词时直接拼中文，比机翻准，而且不用联网。
+# 词表按 Thunderstore 上 R.E.P.O. 社区 6522 个包的实际用词统计出来的。
+_NAME_GLOSSARY = {
+    # 功能词
+    "the": "", "of": "的", "for": "用于", "and": "与", "in": "内", "by": "由",
+    "with": "带", "my": "我的", "all": "全部", "no": "无", "not": "不",
+    "more": "更多", "plus": "增强", "better": "更好的", "best": "最佳",
+    "custom": "自定义", "random": "随机", "infinite": "无限", "ultimate": "终极",
+    "extra": "额外", "new": "新", "old": "旧", "fixed": "修复", "fix": "修复",
+    "test": "测试", "hidden": "隐藏", "shared": "共享", "silly": "搞怪",
+    # 游戏内容
+    "mod": "模组", "mods": "模组", "pack": "包", "modpack": "整合包",
+    "repo": "R.E.P.O.", "item": "物品", "items": "物品", "stuff": "道具",
+    "shop": "商店", "valuable": "贵重物品", "valuables": "贵重物品",
+    "value": "价值", "gem": "宝石", "gold": "金币", "money": "金钱",
+    "cart": "推车", "box": "箱子", "truck": "卡车", "drone": "无人机",
+    "gun": "枪", "weapon": "武器", "weapons": "武器", "melee": "近战",
+    "enemy": "敌人", "enemies": "敌人", "monster": "怪物", "monsters": "怪物",
+    "hunter": "猎人", "huntsman": "猎人", "boss": "首领", "npc": "NPC",
+    "player": "玩家", "players": "玩家", "friend": "朋友", "friends": "朋友",
+    "team": "团队", "lobby": "大厅", "host": "房主", "server": "服务器",
+    "game": "游戏", "level": "关卡", "levels": "关卡", "map": "地图",
+    "maps": "地图", "arena": "竞技场", "extraction": "撤离", "spawn": "生成",
+    "revive": "复活", "death": "死亡", "life": "生命", "health": "生命值",
+    "hp": "生命值", "stamina": "体力", "speed": "速度", "damage": "伤害",
+    "upgrade": "升级", "upgrades": "升级", "buff": "增益", "quest": "任务",
+    "unlock": "解锁", "achievement": "成就", "score": "分数", "coin": "硬币",
+    # 外观与音效
+    "cosmetic": "外观", "cosmetics": "外观", "hat": "帽子", "hats": "帽子",
+    "robe": "长袍", "skin": "皮肤", "skins": "皮肤", "plush": "玩偶",
+    "paint": "涂装", "painting": "画作", "paintings": "画作", "theme": "主题",
+    "music": "音乐", "song": "歌曲", "songs": "歌曲", "sound": "音效",
+    "sounds": "音效", "audio": "音频", "boombox": "音响", "voice": "语音",
+    "chat": "聊天", "meme": "梗", "joke": "玩笑",
+    # 界面与系统
+    "menu": "菜单", "ui": "界面", "hud": "HUD", "config": "配置",
+    "setting": "设置", "settings": "设置", "key": "按键", "keybind": "按键绑定",
+    "translation": "汉化", "translate": "翻译", "language": "语言",
+    "replacer": "替换", "remover": "移除", "delete": "删除", "save": "存档",
+    "loader": "加载器", "lib": "库", "library": "库", "api": "API",
+    "sync": "同步", "multiplayer": "联机", "solo": "单人", "bot": "机器人",
+    "vanilla": "原版", "dlc": "DLC", "cat": "猫", "duck": "鸭子",
+    "mimic": "模仿者", "late": "延迟", "join": "加入", "head": "头部",
+    "body": "身体", "hand": "手", "eye": "眼睛", "scale": "体型",
+    "size": "大小", "gravity": "重力", "jump": "跳跃", "sprint": "冲刺",
+    "flashlight": "手电筒", "camera": "摄像机", "recoil": "后坐力",
+    "empress": "女皇", "king": "国王", "queen": "女王", "minecraft": "我的世界",
+}
+
+
+def translate_name(name):
+    """
+    按词表拼中文名：MoreShopItems → 更多商店物品。
+    有任何一个词不认识就返回空字符串，交给在线翻译兜底。
+    """
+    words = re.findall(r"[A-Za-z]+|\d+", humanize_name(name))
+    if not words:
+        return ""
+    out = []
+    for w in words:
+        if w.isdigit():
+            out.append(w)
+            continue
+        zh = _NAME_GLOSSARY.get(w.lower())
+        if zh is None:
+            return ""
+        out.append(zh)
+    return "".join(out)
+
+
+def translate_text(text, target="zh-CN", proxy="", log=None):
+    """
+    翻译一段英文。带本地缓存，翻过的句子以后秒出且断网可用。
+    依次尝试免费源，全都失败返回空字符串（不抛异常）。
+    """
+    text = (text or "").strip()
+    if not text:
+        return ""
+    if re.search(r"[\u4e00-\u9fff]", text):      # 已经是中文
+        return text
+
+    cache = _load_trans_cache()
+    key = f"{target}|{text}"
+    if key in cache:
+        return cache[key]
+
+    # 有代理（配置的或探测到的）或 Google 直连可用 → 先走 Google，否则先走 MyMemory
+    eff = proxy or _AUTO_PROXY
+    use_google = bool(eff) or bool(_GOOGLE_OK)
+    order = TRANS_PROVIDERS if use_google else list(reversed(TRANS_PROVIDERS))
+    for pname, fn in order:
+        try:
+            out = fn(text, target, eff)
+            if out and out.lower() != text.lower():
+                cache[key] = out
+                _save_trans_cache(cache)
+                if log:
+                    log(f"  翻译[{pname}] {text[:36]} → {out[:36]}")
+                return out
+        except Exception as e:
+            if log:
+                log(f"  翻译源 {pname} 不可用：{type(e).__name__}")
+    return ""
+
+
+def translate_package(name, desc, proxy="", log=None):
+    """
+    翻译一个 Mod 的名字和简介，返回 (中文名, 中文简介)。
+    名字先查词表（MoreShopItems_Updated → 更多商店物品），查不到再联网翻。
+    """
+    tr_name = translate_name(name)
+    if not tr_name:
+        tr_name = translate_text(humanize_name(name), proxy=proxy, log=log)
+    elif log:
+        log(f"  翻译[词表] {name} → {tr_name}")
+    tr_desc = translate_text((desc or "")[:480], proxy=proxy, log=log) if desc else ""
+    return tr_name, tr_desc
