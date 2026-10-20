@@ -1,0 +1,32 @@
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+
+# ---------- PyInstaller 构建产物 ----------
+build/
+dist/
+*.spec
+
+# ---------- 运行时数据（每台机器自己的状态，不入库）----------
+data/
+
+# ---------- 个人配置（含本机路径，不入库）----------
+config.json
+
+# ---------- 第三方 mod 包 ----------
+# mod 版权归各自作者所有，请勿在本仓库中再分发。
+# 想用离线安装功能，请自行把 zip 放进 mods/ 目录（或从 Thunderstore 下载）。
+mods/*.zip
+mods/*.7z
+mods/*.rar
+
+# ---------- 系统 ----------
+.DS_Store
+Thumbs.db
+desktop.ini

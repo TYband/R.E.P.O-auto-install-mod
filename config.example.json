@@ -1,0 +1,13 @@
+{
+    "game_path": "",
+    "local_mods_dir": "",
+    "proxy": "",
+    "backup_before_install": true,
+    "auto_install_list": [
+        "Zehs-REPOLib",
+        "nickklmao-MenuLib",
+        "nickklmao-REPOConfig",
+        "clay-BetterMap",
+        "BlueAmulet-REPO_HD"
+    ]
+}

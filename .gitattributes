@@ -1,0 +1,23 @@
+# 默认按文本处理，自动判断换行符
+* text=auto
+
+# 批处理文件必须是 CRLF —— cmd.exe 只认 CRLF，
+# 用 LF 会导致脚本被拆成碎片命令执行（"'e' 不是内部或外部命令" 的元凶）
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 源码与文档统一 LF
+*.py   text eol=lf
+*.md   text eol=lf
+*.json text eol=lf
+*.txt  text eol=lf
+
+# 图片按二进制处理
+*.png binary
+*.jpg binary
+*.ico binary
+
+# 压缩包按二进制处理
+*.zip binary
+*.7z  binary
+*.rar binary
