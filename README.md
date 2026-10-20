@@ -3,8 +3,13 @@
 > 给《R.E.P.O.》用的图形化 Mod 安装器：自动装 BepInEx 前置、自动补依赖、自动认目录结构。到网吧换个机器，点一下就能装好整套 Mod。
 
 ![Python](https://img.shields.io/badge/Python-3.8%2B-blue)
+
 ![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey)
+
+
+
 ![License](https://img.shields.io/badge/License-MIT-green)
+
 ![Mods](https://img.shields.io/badge/Thunderstore-6500%2B%20mods-orange)
 
 ![界面截图](docs/screenshot.png)
@@ -15,21 +20,21 @@
 
 手动装 R.E.P.O. 的 Mod 有三层坑，每一步都得自己来：
 
-**1. 得先装 BepInEx 框架**
+**1. 得先装 BepInEx 框架**  
 `BepInExPack` 压缩包解开后，要把 `BepInEx` 文件夹、`doorstop_config.ini`、`winhttp.dll` 一起拖进游戏根目录。少一个就不生效。
 
-**2. Mod 之间有依赖链**
+**2. Mod 之间有依赖链**  
 装 `REPOLib` 要 `MenuLib`，装 `MoreShopItems` 要 `NoItemSpawnLimit`……漏装一个，游戏启动就报错。
 
 **3. 每个包的内部结构都不一样**
 
-| 包 | 内部结构 | 该放哪 |
-|---|---|---|
-| `BepInEx-BepInExPack` | `BepInExPack/BepInEx/...` + `winhttp.dll` | 游戏根目录（要剥掉外壳文件夹） |
-| `Zehs-REPOLib` | `plugins/REPOLib.dll` | `BepInEx/plugins/` |
-| `clay-BetterMap` | `BetterMap.dll`（直接在根） | `BepInEx/plugins/<包名>/` |
-| `PxntxrezStudio-No_Save_Delete` | `Plugins/NoSaveDelete.dll`（大写 P） | `BepInEx/plugins/<包名>/` |
-| `toored-Chinese_Translation` | 自带整套 `BepInEx/core`、`patchers`、`config/Translation` | 原样铺到游戏根目录 |
+| 包                               | 内部结构                                                | 该放哪                     |
+| ------------------------------- | --------------------------------------------------- | ----------------------- |
+| `BepInEx-BepInExPack`           | `BepInExPack/BepInEx/...` + `winhttp.dll`           | 游戏根目录（要剥掉外壳文件夹）         |
+| `Zehs-REPOLib`                  | `plugins/REPOLib.dll`                               | `BepInEx/plugins/`      |
+| `clay-BetterMap`                | `BetterMap.dll`（直接在根）                               | `BepInEx/plugins/<包名>/` |
+| `PxntxrezStudio-No_Save_Delete` | `Plugins/NoSaveDelete.dll`（大写 P）                    | `BepInEx/plugins/<包名>/` |
+| `toored-Chinese_Translation`    | 自带整套 `BepInEx/core`、`patchers`、`config/Translation` | 原样铺到游戏根目录               |
 
 最后一个最容易翻车：汉化包如果被当成普通 Mod 塞进 `plugins/<包名>/` 子文件夹，翻译器就找不到自己的配置和翻译文件，**汉化直接失效**。
 
@@ -46,6 +51,7 @@
 - **结构智能识别** —— 按包内实际结构决定落点，`plugins/`、`Plugins/`、`patchers/`、自带 `BepInEx/` 都能正确归类
 - **离线安装** —— `mods/` 目录放好 zip，网吧不联网也能装
 - **在线安装** —— 界面直接浏览 Thunderstore 全部 6500+ Mod，搜名字勾选即可
+- **界面带图标** —— 列表和详情面板直接显示 Thunderstore 官方图标，选 Mod 不用只看名字猜
 - **自动清旧版本** —— 同一个 Mod 装了新旧两个版本会导致重复加载、游戏闪退，每次安装自动清理
 - **安装前备份** —— 首次安装会把原有 `BepInEx` 备份到 `data/backups/`
 - **精确卸载** —— 按安装清单逐个文件删除，不留垃圾
@@ -56,7 +62,7 @@
 
 ### 方式一：用打包好的 EXE（网吧推荐）
 
-在任意有 Python 的电脑上双击 `build-exe.bat`，得到 `dist/REPO-Mod-Installer.exe`。
+在任意有 Python 的电脑上双击 `build-exe.bat`，得到 `dist/REPO-Mod-Installer.exe`。  
 Mod 包会被打进 exe 内部，**拷这一个文件就能用，目标机器不需要装 Python**。
 
 ### 方式二：源码运行
@@ -64,7 +70,7 @@ Mod 包会被打进 exe 内部，**拷这一个文件就能用，目标机器不
 ```bash
 git clone https://github.com/<你的用户名>/repo-mod-installer.git
 cd repo-mod-installer
-pip install -r requirements.txt
+pip install -r requirements.txt      # requests + 可选的 Pillow（图标更清晰）
 ```
 
 双击 `启动.bat`（会自动挑选带 tkinter 的 Python 解释器），或直接：
@@ -114,11 +120,11 @@ Thunderstore 上每个 Mod 的 `manifest.json` 里都有 `dependencies` 字段�
 
 ### 三种安装方式下的行为
 
-| 方式 | 依赖处理 |
-|---|---|
-| **在线安装**（界面勾选） | 自动解析 + 自动下载，无需干预 |
+| 方式                      | 依赖处理                            |
+| ----------------------- | ------------------------------- |
+| **在线安装**（界面勾选）          | 自动解析 + 自动下载，无需干预                |
 | **离线安装 + 勾选「自动补齐缺失依赖」** | 先装本地包，缺的依赖联网下载，**并保存进 `mods/`** |
-| **离线安装 + 不勾选**（真断网） | 只列出缺哪些，不阻断安装 |
+| **离线安装 + 不勾选**（真断网）     | 只列出缺哪些，不阻断安装                    |
 
 ### 为什么要把依赖存回 `mods/`
 
@@ -142,22 +148,36 @@ Thunderstore 上每个 Mod 的 `manifest.json` 里都有 `dependencies` 字段�
 
 ## 界面说明
 
-| 区域 | 说明 |
-|---|---|
-| **① 游戏位置** | 自动检测 R.E.P.O. 安装目录；检测不到可手动指定 |
-| **① 本地 Mod 包** | 显示 `mods/` 里的包数量，「⚡ 一键离线安装」= 全部装一遍 |
-| **② 选择 Mod** | 联网浏览 Thunderstore；点行即勾选，支持搜索、热门 Top60、只看已安装 |
-| **③ 运行日志** | 每一步在做什么，出错原因也在这里 |
+左边选 Mod，右边看详情，底部是日志——不用记路径，也不用记按钮顺序。
 
-| 按钮 | 作用 |
-|---|---|
-| ⚡ 一键离线安装 | 装 `mods/` 里的全部包（缺依赖时按勾选自动补齐） |
-| 安装勾选的 Mod | 装列表里勾选的（联网，自动补依赖） |
-| 一键安装我的配置 | 装 `config.json` 中 `auto_install_list` 定义的整套 |
-| 卸载选中 | 按安装记录精确删除 |
-| 清理下载缓存 | 清空 `data/cache/` |
-| 强制重装 BepInEx | BepInEx 损坏或想换版本时勾选 |
-| 自动补齐缺失依赖 | 默认开启。断网时自动降级为仅提示，不会卡住 |
+| 区域             | 说明                                                          |
+| -------------- | ----------------------------------------------------------- |
+| **游戏位置**       | 自动检测 R.E.P.O. 安装目录；检测不到可手动指定                                |
+| **本地 Mod 包**   | 显示 `mods/` 里的包数量，「⚡ 一键离线安装」= 全部装一遍                          |
+| **左：Mod 列表**   | 每行带 Thunderstore 官方图标、版本、下载量、安装状态；点行出详情，点 ☐ 勾选，双击切换勾选        |
+| **右：详情面板**     | 112px 大图标 + 作者 / 版本 / 下载量 / 包体积 / 已装版本 + 官方简介 + 依赖清单 + 安装/打开网页/卸载 |
+| **底部：运行日志**    | 每一步在做什么，出错原因也在这里；右上角「收起」可折叠，给列表腾地方                          |
+
+几个细节：
+
+- **图标是异步拉的** —— 列表先秒开，图标下载完再逐个贴上，不会因为联网慢卡住界面
+- **自动选中第一行** —— 打开就有内容看，不用先猜哪一行能点
+- **悬停高亮 + 状态胶囊** —— 顶部胶囊直接告诉你 BepInEx 就绪没有、装了几个 Mod、铺了几个 dll
+- **窗口自适应** —— 按屏幕可用空间定尺寸，高 DPI（125% / 150% 缩放）下也不会超出屏幕被裁掉
+
+| 按钮           | 作用                                          |
+| ------------ | ------------------------------------------- |
+| ⚡ 一键离线安装     | 装 `mods/` 里的全部包（缺依赖时按勾选自动补齐）                |
+| 安装勾选的 Mod    | 装列表里勾选的（联网，自动补依赖）                           |
+| 一键安装我的配置     | 装 `config.json` 中 `auto_install_list` 定义的整套 |
+| 安装这个 / 重新安装  | 详情面板里的按钮，只装当前这一个                            |
+| 打开网页         | 用浏览器打开该 Mod 的 Thunderstore 页面               |
+| 卸载           | 按安装记录精确删除                                   |
+| 清理缓存         | 清空 `data/cache/`                            |
+| 重装 BepInEx   | BepInEx 损坏或想换版本时勾选                          |
+| 自动补依赖        | 默认开启。断网时自动降级为仅提示，不会卡住                       |
+
+> 想更清晰：`pip install Pillow` 会启用 LANCZOS 缩放 + 圆角图标。不装也能跑，只是图标是最近邻缩放的，边缘会有点硬。
 
 ---
 
@@ -178,13 +198,13 @@ Thunderstore 上每个 Mod 的 `manifest.json` 里都有 `dependencies` 字段�
 }
 ```
 
-| 字段 | 说明 |
-|---|---|
-| `game_path` | 游戏目录。**留空 = 自动检测**（网吧盘符不固定，建议留空） |
-| `local_mods_dir` | 离线包目录。留空 = 使用项目自带的 `mods/` |
-| `proxy` | 下载代理，如 `http://127.0.0.1:7890`。Thunderstore 服务器在境外，网络慢时可填 |
-| `backup_before_install` | 首次安装前是否备份原有 BepInEx |
-| `auto_install_list` | 「一键安装我的配置」的 Mod 清单，填 Thunderstore 全名（`作者-Mod名`） |
+| 字段                      | 说明                                                        |
+| ----------------------- | --------------------------------------------------------- |
+| `game_path`             | 游戏目录。**留空 = 自动检测**（网吧盘符不固定，建议留空）                          |
+| `local_mods_dir`        | 离线包目录。留空 = 使用项目自带的 `mods/`                                |
+| `proxy`                 | 下载代理，如 `http://127.0.0.1:7890`。Thunderstore 服务器在境外，网络慢时可填 |
+| `backup_before_install` | 首次安装前是否备份原有 BepInEx                                       |
+| `auto_install_list`     | 「一键安装我的配置」的 Mod 清单，填 Thunderstore 全名（`作者-Mod名`）           |
 
 ---
 
@@ -234,6 +254,7 @@ repo-mod-installer/
 │   └── README.md
 └── data/                  # 运行时生成，不入库
     ├── index.json         # Mod 索引缓存
+    ├── icons/             # Mod 图标缓存
     ├── installed.json     # 已安装清单
     ├── cache/             # 下载缓存
     └── backups/           # BepInEx 备份
@@ -243,28 +264,28 @@ repo-mod-installer/
 
 ## 常见问题
 
-**Q：装完游戏闪退？**
-最常见原因是同一个 Mod 存在两个版本，BepInEx 会同时加载然后崩溃。工具每次安装会自动删掉同名 Mod 的旧版本目录。
+**Q：装完游戏闪退？**  
+最常见原因是同一个 Mod 存在两个版本，BepInEx 会同时加载然后崩溃。工具每次安装会自动删掉同名 Mod 的旧版本目录。  
 若仍闪退，勾选「强制重装 BepInEx」再装一遍；`data/backups/` 里有首次安装前的原始备份。
 
-**Q：怎么确认 Mod 装好了？**
+**Q：怎么确认 Mod 装好了？**  
 启动游戏时会弹出一个黑色命令行窗口，那是 BepInEx 在加载插件，会列出加载的 dll。进游戏后按 **F1** 可查看 Mod 配置项。
 
-**Q：汉化不生效？**
-检查两个位置都在：`BepInEx/patchers/Font.dll`（字体补丁）和 `BepInEx/config/Translation/zh/`（翻译文件）。
+**Q：汉化不生效？**  
+检查两个位置都在：`BepInEx/patchers/Font.dll`（字体补丁）和 `BepInEx/config/Translation/zh/`（翻译文件）。  
 汉化包必须原样铺到游戏根目录，不能被塞进 `plugins/` 子文件夹 —— 本工具已正确处理。
 
-**Q：双击 `启动.bat` 报一堆 `'xx' 不是内部或外部命令`？**
+**Q：双击 `启动.bat` 报一堆 `'xx' 不是内部或外部命令`？**  
 旧版本脚本用 LF 换行导致 cmd 解析错乱，已修复为 CRLF + 纯 ASCII。若仍遇到，直接用 `build-exe.bat` 生成的 exe。
 
-**Q：日志提示某 Mod 依赖某个包，本地没有，要紧吗？**
-这是没勾选「自动补齐缺失依赖」或处于断网状态时的提示。多数 Mod 缺可选依赖也能跑，游戏能正常启动就不用管。
+**Q：日志提示某 Mod 依赖某个包，本地没有，要紧吗？**  
+这是没勾选「自动补齐缺失依赖」或处于断网状态时的提示。多数 Mod 缺可选依赖也能跑，游戏能正常启动就不用管。  
 想补齐：勾上「自动补齐缺失依赖」再装一次，工具会联网下载并保存进 `mods/`，之后离线也有。
 
-**Q：支持其他游戏吗？**
+**Q：支持其他游戏吗？**  
 目前只针对 R.E.P.O.（AppID `3241660`）调优。核心逻辑是通用的，改 `core.py` 里的 `REPO_APPID` 和 Thunderstore 社区名，理论上可用于其他 Unity + BepInEx 的游戏，但未做验证。
 
-**Q：Linux / macOS 能用吗？**
+**Q：Linux / macOS 能用吗？**  
 不能。游戏定位依赖 Windows 注册表和 Steam 的 Windows 目录结构，界面用 Tkinter。
 
 ---
@@ -289,6 +310,7 @@ repo-mod-installer/
 ---
 
 <details>
+
 <summary><b>English</b></summary>
 
 ### R.E.P.O. One-Click Mod Installer
@@ -307,6 +329,7 @@ Installing mods for R.E.P.O. by hand involves three tedious layers: setting up t
 - When installing from a local folder, missing dependencies are fetched automatically and **saved back into `mods/`**, so the folder becomes self-contained for offline use
 - Classifies each archive's layout and extracts every file to its correct destination
 - Works fully **offline** from a local `mods/` folder — ideal for internet cafés
+- A card-style GUI with Thunderstore icons in the list and a detail panel (author, size, downloads, dependencies), loaded asynchronously so the list opens instantly
 - Removes stale versions of the same mod (a common cause of crashes)
 - Backs up the existing `BepInEx` directory before the first install
 - Uses the **r2modman / Gale** directory convention, so it stays compatible with those managers

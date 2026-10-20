@@ -8,10 +8,12 @@ R.E.P.O. 一键装 Mod —— 图形界面
 import os
 import sys
 import queue
+import hashlib
 import threading
 import webbrowser
 import subprocess
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 
 try:
     import tkinter as tk
@@ -22,7 +24,7 @@ except ImportError:
     print("")
     print(" 解决办法（任选一个）：")
     print("   1. 重新安装 Python，安装时勾选「tcl/tk and IDLE」")
-    print("   2. 在自己电脑上运行 打包成exe.bat，用生成的 exe 启动")
+    print("   2. 在自己电脑上运行 build-exe.bat，用生成的 exe 启动")
     print("=" * 62)
     try:
         input("\n按回车键退出…")
@@ -32,28 +34,155 @@ except ImportError:
 
 import core
 
+# 有 Pillow 就用它做高质量缩放 + 圆角，没有则退回 Tk 原生 PNG
+try:
+    from PIL import Image, ImageDraw, ImageOps, ImageTk
+    HAS_PIL = True
+except ImportError:
+    HAS_PIL = False
 
-FONT = "Microsoft YaHei UI"
+
+# ============================================================
+# 视觉常量
+# ============================================================
+F = "Microsoft YaHei UI"
 MONO = "Consolas"
 
+BG = "#f4f5f7"
+CARD = "#ffffff"
+BORDER = "#e4e7ec"
+TEXT = "#1f2430"
+MUTED = "#6b7280"
+ACCENT = "#3b6fe0"
+ACCENT_DK = "#2a58c4"
+ACCENT_LT = "#eaf0fd"
+OK = "#15803d"
+OK_BG = "#e7f5ec"
+WARN = "#b45309"
+WARN_BG = "#fdf3e3"
+BAD = "#b91c1c"
+BAD_BG = "#fdecec"
+ROW_ALT = "#fafbfc"
+ROW_HOVER = "#f1f6fe"
 
+
+# ============================================================
+# 图标缓存（异步下载 + 缩放 + 圆角）
+# ============================================================
+class IconCache:
+    def __init__(self, root, log=None):
+        self.root = root
+        self.log = log or (lambda *a: None)
+        self.dir = core.DATA_DIR / "icons"
+        self.dir.mkdir(parents=True, exist_ok=True)
+        self.mem = {}            # (url, size) -> PhotoImage
+        self.waiters = {}        # (url, size) -> [callback]
+        self.requested = set()   # url 已发起下载
+        self.done = queue.Queue()
+        self.pool = ThreadPoolExecutor(max_workers=6)
+        self._poll()
+
+    def _path(self, url):
+        return self.dir / (hashlib.md5(url.encode("utf-8")).hexdigest() + ".png")
+
+    def get(self, url, size, callback):
+        """异步拿图标；就绪后回调 callback(PhotoImage or None)"""
+        if not url:
+            callback(None)
+            return
+        key = (url, size)
+        if key in self.mem:
+            callback(self.mem[key])
+            return
+
+        self.waiters.setdefault(key, []).append(callback)
+        path = self._path(url)
+
+        if path.exists():
+            self._load(url, path, size)
+        elif url not in self.requested:
+            self.requested.add(url)
+            self.pool.submit(self._download, url, path)
+
+    def _download(self, url, path):
+        try:
+            import requests
+            r = requests.get(url, timeout=20,
+                             headers={"User-Agent": core.USER_AGENT})
+            if r.status_code == 200 and r.content:
+                tmp = path.with_suffix(".part")
+                tmp.write_bytes(r.content)
+                tmp.replace(path)
+                self.done.put((url, path))
+        except Exception:
+            pass
+
+    def _poll(self):
+        try:
+            while True:
+                url, path = self.done.get_nowait()
+                for (u, size) in [k for k in self.waiters if k[0] == url]:
+                    self._load(u, path, size)
+        except queue.Empty:
+            pass
+        self.root.after(120, self._poll)
+
+    def _load(self, url, path, size):
+        key = (url, size)
+        if key in self.mem:
+            return
+        photo = None
+        try:
+            if HAS_PIL:
+                im = Image.open(path).convert("RGBA")
+                im = ImageOps.fit(im, (size, size), Image.LANCZOS)
+                mask = Image.new("L", (size, size), 0)
+                radius = max(4, size // 7)
+                ImageDraw.Draw(mask).rounded_rectangle(
+                    (0, 0, size - 1, size - 1), radius=radius, fill=255)
+                im.putalpha(mask)
+                photo = ImageTk.PhotoImage(im, master=self.root)
+            else:
+                photo = tk.PhotoImage(file=str(path), master=self.root)
+                f = max(1, round(max(photo.width(), photo.height()) / size))
+                if f > 1:
+                    photo = photo.subsample(f, f)
+        except Exception:
+            photo = None
+
+        self.mem[key] = photo
+        for cb in self.waiters.pop(key, []):
+            try:
+                cb(photo)
+            except Exception:
+                pass
+
+
+# ============================================================
+# 主界面
+# ============================================================
 class App:
     def __init__(self, root):
         self.root = root
         self.root.title("R.E.P.O. 一键装 Mod")
-        self.root.geometry("980x700")
-        self.root.minsize(820, 600)
+        self.root.configure(bg=BG)
 
         self.cfg = core.load_config()
         self.index = None
         self.game_dir = None
         self.local_dir = None
-        self.selected = set()        # 勾选的 full_name
+        self.selected = set()
         self.busy = False
         self.log_queue = queue.Queue()
+        self._hover = None
+        self._base_tag = {}
+        self._log_open = True
 
         self._setup_style()
         self._build()
+        self._fit_window()
+
+        self.icons = IconCache(root, log=self._log)
         self._init_local_dir()
         self._detect_game()
         self._load_index_from_cache()
@@ -61,144 +190,322 @@ class App:
 
     # -------------------------------------------------- 样式
     def _setup_style(self):
-        style = ttk.Style()
+        st = ttk.Style()
         try:
-            style.theme_use("clam")
+            st.theme_use("clam")
         except Exception:
             pass
-        style.configure(".", font=(FONT, 9))
-        style.configure("Treeview", rowheight=26, font=(FONT, 9),
-                        fieldbackground="white", background="white")
-        style.configure("Treeview.Heading", font=(FONT, 9, "bold"))
-        style.configure("Title.TLabel", font=(FONT, 15, "bold"))
-        style.configure("Sub.TLabel", font=(FONT, 9), foreground="#666666")
-        style.configure("Ok.TLabel", font=(FONT, 9), foreground="#1a7f37")
-        style.configure("Bad.TLabel", font=(FONT, 9), foreground="#c0392b")
-        style.configure("Go.TButton", font=(FONT, 10, "bold"))
+
+        st.configure(".", background=BG, foreground=TEXT, font=(F, 9))
+        st.configure("TFrame", background=BG)
+        st.configure("Card.TFrame", background=CARD)
+        st.configure("TLabel", background=BG, foreground=TEXT)
+        st.configure("Card.TLabel", background=CARD, foreground=TEXT)
+        st.configure("Sub.TLabel", background=BG, foreground=MUTED, font=(F, 9))
+        st.configure("CardSub.TLabel", background=CARD, foreground=MUTED, font=(F, 9))
+        st.configure("Title.TLabel", background=BG, foreground=TEXT, font=(F, 15, "bold"))
+        st.configure("H2.TLabel", background=CARD, foreground=TEXT, font=(F, 11, "bold"))
+
+        # 输入框
+        st.configure("TEntry", fieldbackground="#ffffff", background="#ffffff",
+                     bordercolor=BORDER, lightcolor=BORDER, darkcolor=BORDER,
+                     insertcolor=TEXT, padding=(8, 6))
+        st.map("TEntry", bordercolor=[("focus", ACCENT)])
+
+        # 主按钮
+        st.configure("Accent.TButton", background=ACCENT, foreground="#ffffff",
+                     borderwidth=0, focusthickness=0, padding=(16, 9),
+                     font=(F, 9, "bold"), relief="flat")
+        st.map("Accent.TButton",
+               background=[("active", ACCENT_DK), ("pressed", ACCENT_DK),
+                           ("disabled", "#b8c7ea")],
+               foreground=[("disabled", "#f2f5fb")])
+
+        # 次级按钮
+        st.configure("Ghost.TButton", background=CARD, foreground=TEXT,
+                     bordercolor=BORDER, borderwidth=1, focusthickness=0,
+                     padding=(11, 7), relief="flat")
+        st.map("Ghost.TButton",
+               background=[("active", "#f6f8fb"), ("pressed", "#eef2f8")],
+               bordercolor=[("active", "#cfd6e0")])
+
+        # 小号扁平按钮（标签页）
+        st.configure("TabOn.TButton", background=ACCENT_LT, foreground=ACCENT,
+                     borderwidth=0, focusthickness=0, padding=(12, 5),
+                     font=(F, 9, "bold"), relief="flat")
+        st.configure("TabOff.TButton", background=BG, foreground=MUTED,
+                     borderwidth=0, focusthickness=0, padding=(12, 5),
+                     font=(F, 9), relief="flat")
+        st.map("TabOff.TButton", background=[("active", "#e9edf3")],
+               foreground=[("active", TEXT)])
+
+        st.configure("Mini.TButton", background=CARD, foreground=MUTED,
+                     borderwidth=0, focusthickness=0, padding=(8, 3),
+                     font=(F, 8), relief="flat")
+        st.map("Mini.TButton", background=[("active", "#f0f3f7")],
+               foreground=[("active", TEXT)])
+
+        # 列表
+        st.configure("Treeview", background=CARD, fieldbackground=CARD,
+                     foreground=TEXT, borderwidth=0, relief="flat",
+                     rowheight=54, font=(F, 9))
+        st.configure("Treeview.Heading", background=CARD, foreground=MUTED,
+                     borderwidth=0, relief="flat", padding=(6, 9),
+                     font=(F, 9, "bold"))
+        st.map("Treeview.Heading", background=[("active", CARD)])
+        st.map("Treeview", background=[("selected", ACCENT_LT)],
+               foreground=[("selected", TEXT)])
+
+        st.configure("Accent.Horizontal.TProgressbar", background=ACCENT,
+                     troughcolor="#e9edf3", borderwidth=0, thickness=4)
+
+        st.configure("TCheckbutton", background=BG, foreground=TEXT,
+                     focusthickness=0)
+        st.map("TCheckbutton", background=[("active", BG)])
+        st.configure("Card.TCheckbutton", background=CARD, foreground=TEXT,
+                     focusthickness=0)
+        st.map("Card.TCheckbutton", background=[("active", CARD)])
+
+    # -------------------------------------------------- 小工具
+    def _card(self, parent):
+        """1px 边框的白色卡片：外层当边框，内层装内容"""
+        outer = tk.Frame(parent, bg=BORDER)
+        inner = tk.Frame(outer, bg=CARD)
+        inner.pack(fill="both", expand=True, padx=1, pady=1)
+        return outer, inner
+
+    def _hline(self, parent, pady=(0, 0)):
+        ln = tk.Frame(parent, bg=BORDER, height=1)
+        ln.pack(fill="x", pady=pady)
+        return ln
 
     # -------------------------------------------------- 界面
     def _build(self):
-        # ===== 顶部：游戏目录 =====
-        top = ttk.LabelFrame(self.root, text=" ① 游戏位置 ", padding=10)
-        top.pack(fill="x", padx=12, pady=(12, 6))
+        outer = tk.Frame(self.root, bg=BG)
+        outer.pack(fill="both", expand=True, padx=18, pady=(14, 12))
 
-        row = ttk.Frame(top)
-        row.pack(fill="x")
-        ttk.Label(row, text="R.E.P.O. 目录:").pack(side="left")
+        # ===== 标题栏 =====
+        head = tk.Frame(outer, bg=BG)
+        head.pack(fill="x")
+        tk.Label(head, text="R.E.P.O. 一键装 Mod", bg=BG, fg=TEXT,
+                 font=(F, 16, "bold")).pack(side="left")
+        tk.Label(head, text="自动装 BepInEx · 自动补依赖 · 支持离线",
+                 bg=BG, fg=MUTED, font=(F, 9)).pack(side="left", padx=(12, 0), pady=(5, 0))
+
+        self.chip = tk.Label(head, text="检测中…", bg="#eef1f5", fg=MUTED,
+                             font=(F, 9), padx=12, pady=5)
+        self.chip.pack(side="right")
+
+        self._hline(outer, pady=(12, 12))
+
+        # ===== 路径区 =====
+        rows = tk.Frame(outer, bg=BG)
+        rows.pack(fill="x")
+
+        r1 = tk.Frame(rows, bg=BG)
+        r1.pack(fill="x")
+        tk.Label(r1, text="游戏目录", bg=BG, fg=MUTED, font=(F, 9),
+                 width=9, anchor="w").pack(side="left")
         self.path_var = tk.StringVar(value="检测中…")
-        ttk.Entry(row, textvariable=self.path_var, state="readonly").pack(
-            side="left", fill="x", expand=True, padx=6)
-        ttk.Button(row, text="自动检测", command=self._detect_game).pack(side="left", padx=2)
-        ttk.Button(row, text="手动选择", command=self._pick_game).pack(side="left", padx=2)
-        ttk.Button(row, text="打开目录", command=self._open_game_dir).pack(side="left", padx=2)
+        ttk.Entry(r1, textvariable=self.path_var, state="readonly").pack(
+            side="left", fill="x", expand=True, padx=(0, 8))
+        ttk.Button(r1, text="检测", style="Ghost.TButton",
+                   command=self._detect_game).pack(side="left", padx=(0, 6))
+        ttk.Button(r1, text="选择", style="Ghost.TButton",
+                   command=self._pick_game).pack(side="left", padx=(0, 6))
+        ttk.Button(r1, text="打开", style="Ghost.TButton",
+                   command=self._open_game_dir).pack(side="left")
 
-        self.status_var = tk.StringVar(value="")
-        self.status_lbl = ttk.Label(top, textvariable=self.status_var, style="Sub.TLabel")
-        self.status_lbl.pack(anchor="w", pady=(6, 0))
-
-        # ---- 本地离线包 ----
-        sep = ttk.Separator(top, orient="horizontal")
-        sep.pack(fill="x", pady=8)
-
-        row2 = ttk.Frame(top)
-        row2.pack(fill="x")
-        ttk.Label(row2, text="本地 Mod 包:").pack(side="left")
+        r2 = tk.Frame(rows, bg=BG)
+        r2.pack(fill="x", pady=(8, 0))
+        tk.Label(r2, text="本地包", bg=BG, fg=MUTED, font=(F, 9),
+                 width=9, anchor="w").pack(side="left")
         self.local_var = tk.StringVar(value="")
-        ttk.Entry(row2, textvariable=self.local_var, state="readonly").pack(
-            side="left", fill="x", expand=True, padx=6)
-        ttk.Button(row2, text="选择文件夹", command=self._pick_local_dir).pack(side="left", padx=2)
-        self.btn_offline = ttk.Button(row2, text="⚡ 一键离线安装", style="Go.TButton",
+        ttk.Entry(r2, textvariable=self.local_var, state="readonly").pack(
+            side="left", fill="x", expand=True, padx=(0, 8))
+        ttk.Button(r2, text="选择", style="Ghost.TButton",
+                   command=self._pick_local_dir).pack(side="left", padx=(0, 6))
+        self.btn_offline = ttk.Button(r2, text="⚡ 一键离线安装", style="Accent.TButton",
                                       command=self._install_offline)
-        self.btn_offline.pack(side="left", padx=(6, 2))
+        self.btn_offline.pack(side="left")
 
-        self.local_hint = ttk.Label(top, text="", style="Sub.TLabel")
-        self.local_hint.pack(anchor="w", pady=(4, 0))
+        self.local_hint = tk.Label(rows, text="", bg=BG, fg=MUTED, font=(F, 8),
+                                   anchor="w")
+        self.local_hint.pack(fill="x", pady=(6, 0))
 
-        # ===== 中部：mod 列表 =====
-        mid = ttk.LabelFrame(self.root, text=" ② 选择 Mod ", padding=10)
-        mid.pack(fill="both", expand=True, padx=12, pady=6)
+        # ===== 主体：左列表 + 右详情 =====
+        main = tk.Frame(outer, bg=BG)
+        main.pack(fill="both", expand=True, pady=(12, 0))
+        main.columnconfigure(0, weight=1)
+        main.columnconfigure(1, minsize=352, weight=0)
+        main.rowconfigure(0, weight=1)
 
-        bar = ttk.Frame(mid)
-        bar.pack(fill="x", pady=(0, 6))
+        # ---- 左：列表 ----
+        l_outer, l = self._card(main)
+        l_outer.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
 
-        ttk.Label(bar, text="搜索:").pack(side="left")
+        bar = tk.Frame(l, bg=CARD)
+        bar.pack(fill="x", padx=14, pady=(12, 8))
+
+        tk.Label(bar, text="搜索", bg=CARD, fg=MUTED, font=(F, 9)).pack(side="left")
         self.search_var = tk.StringVar()
-        ent = ttk.Entry(bar, textvariable=self.search_var, width=28)
-        ent.pack(side="left", padx=(4, 8))
+        ent = ttk.Entry(bar, textvariable=self.search_var, width=22)
+        ent.pack(side="left", padx=(6, 12))
         ent.bind("<KeyRelease>", lambda e: self._refresh_list())
 
-        ttk.Button(bar, text="全部 Mod", command=self._show_all).pack(side="left", padx=2)
-        ttk.Button(bar, text="热门 Top60", command=self._show_popular).pack(side="left", padx=2)
-        ttk.Button(bar, text="已安装", command=self._show_installed).pack(side="left", padx=2)
-        ttk.Button(bar, text="刷新索引", command=self._refresh_index).pack(side="left", padx=2)
+        self.tab_hot = ttk.Button(bar, text="热门", style="TabOn.TButton",
+                                  command=self._show_popular)
+        self.tab_hot.pack(side="left", padx=(0, 4))
+        self.tab_all = ttk.Button(bar, text="全部", style="TabOff.TButton",
+                                  command=self._show_all)
+        self.tab_all.pack(side="left", padx=(0, 4))
+        self.tab_inst = ttk.Button(bar, text="已安装", style="TabOff.TButton",
+                                   command=self._show_installed)
+        self.tab_inst.pack(side="left")
 
         self.count_var = tk.StringVar(value="")
-        ttk.Label(bar, textvariable=self.count_var, style="Sub.TLabel").pack(side="right")
+        tk.Label(bar, textvariable=self.count_var, bg=CARD, fg=MUTED,
+                 font=(F, 8)).pack(side="right")
+        ttk.Button(bar, text="刷新", style="Mini.TButton",
+                   command=self._refresh_index).pack(side="right", padx=(0, 8))
 
-        # 列表
-        wrap = ttk.Frame(mid)
-        wrap.pack(fill="both", expand=True)
+        wrap = tk.Frame(l, bg=CARD)
+        wrap.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
         cols = ("sel", "name", "ver", "dl", "state")
-        self.tree = ttk.Treeview(wrap, columns=cols, show="headings", selectmode="browse")
-        self.tree.heading("sel", text="选")
+        self.tree = ttk.Treeview(wrap, columns=cols, show="tree headings",
+                                 selectmode="browse", height=7)
+        self.tree.heading("#0", text="")
+        self.tree.heading("sel", text="")
         self.tree.heading("name", text="Mod 名称")
         self.tree.heading("ver", text="版本")
         self.tree.heading("dl", text="下载量")
         self.tree.heading("state", text="状态")
 
-        self.tree.column("sel", width=40, anchor="center", stretch=False)
-        self.tree.column("name", width=440, anchor="w")
-        self.tree.column("ver", width=110, anchor="center", stretch=False)
-        self.tree.column("dl", width=90, anchor="e", stretch=False)
-        self.tree.column("state", width=110, anchor="center", stretch=False)
+        self.tree.column("#0", width=52, stretch=False, anchor="center")
+        self.tree.column("sel", width=32, stretch=False, anchor="center")
+        self.tree.column("name", width=300, anchor="w")
+        self.tree.column("ver", width=88, stretch=False, anchor="center")
+        self.tree.column("dl", width=80, stretch=False, anchor="e")
+        self.tree.column("state", width=92, stretch=False, anchor="center")
 
         vsb = ttk.Scrollbar(wrap, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=vsb.set)
         self.tree.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
 
+        self.tree.tag_configure("even", background=CARD)
+        self.tree.tag_configure("odd", background=ROW_ALT)
+        self.tree.tag_configure("hover", background=ROW_HOVER)
+
         self.tree.bind("<Button-1>", self._on_click)
+        self.tree.bind("<Motion>", self._on_motion)
+        self.tree.bind("<<TreeviewSelect>>", lambda e: self._show_detail())
+        self.tree.bind("<Double-1>", self._on_double)
         self.tree.bind("<space>", lambda e: self._toggle_current())
 
-        self.tree.tag_configure("installed", foreground="#1a7f37")
-        self.tree.tag_configure("notinstalled", foreground="#333333")
+        # ---- 右：详情 ----
+        r_outer, rp = self._card(main)
+        r_outer.grid(row=0, column=1, sticky="nsew")
 
-        # ===== 按钮区 =====
-        act = ttk.Frame(self.root, padding=(12, 2))
-        act.pack(fill="x")
+        pad = tk.Frame(rp, bg=CARD)
+        pad.pack(fill="both", expand=True, padx=18, pady=16)
 
-        self.btn_install = ttk.Button(act, text="安装勾选的 Mod", style="Go.TButton",
+        self.d_icon = tk.Label(pad, bg=CARD)
+        self.d_icon.pack(anchor="w")
+
+        self.d_name = tk.Label(pad, text="", bg=CARD, fg=TEXT, font=(F, 12, "bold"),
+                               anchor="w", justify="left", wraplength=300)
+        self.d_name.pack(fill="x", pady=(10, 2))
+
+        self.d_meta = tk.Label(pad, text="", bg=CARD, fg=MUTED, font=(F, 9),
+                               anchor="w", justify="left", wraplength=300)
+        self.d_meta.pack(fill="x")
+
+        self.d_desc = tk.Label(pad, text="", bg=CARD, fg="#4b5563", font=(F, 9),
+                               anchor="nw", justify="left", wraplength=300)
+        self.d_desc.pack(fill="x", pady=(10, 0))
+
+        self.d_deps = tk.Label(pad, text="", bg=CARD, fg=MUTED, font=(F, 8),
+                               anchor="nw", justify="left", wraplength=300)
+        self.d_deps.pack(fill="x", pady=(10, 0))
+
+        self.d_btns = tk.Frame(pad, bg=CARD)
+        self.d_btns.pack(side="bottom", fill="x", pady=(12, 0))
+
+        self.btn_detail_install = ttk.Button(self.d_btns, text="安装这个",
+                                             style="Accent.TButton",
+                                             command=self._install_detail)
+        self.btn_detail_install.pack(side="left")
+        ttk.Button(self.d_btns, text="打开网页", style="Ghost.TButton",
+                   command=self._open_web).pack(side="left", padx=(8, 0))
+        ttk.Button(self.d_btns, text="卸载", style="Ghost.TButton",
+                   command=self._uninstall_detail).pack(side="left", padx=(8, 0))
+
+        self._show_detail_placeholder()
+
+        # ===== 操作栏 =====
+        act = tk.Frame(outer, bg=BG)
+        act.pack(fill="x", pady=(12, 0))
+
+        self.btn_install = ttk.Button(act, text="安装勾选的 Mod", style="Accent.TButton",
                                       command=self._install_selected)
-        self.btn_install.pack(side="left", ipady=4, ipadx=8)
-
-        ttk.Button(act, text="一键安装我的配置", command=self._install_profile).pack(
-            side="left", padx=6, ipady=4, ipadx=8)
-        ttk.Button(act, text="卸载选中", command=self._uninstall_selected).pack(
-            side="left", padx=2, ipady=4)
-        ttk.Button(act, text="清理下载缓存", command=self._clear_cache).pack(
-            side="left", padx=2, ipady=4)
-
-        self.force_bep = tk.BooleanVar(value=False)
-        ttk.Checkbutton(act, text="强制重装 BepInEx", variable=self.force_bep).pack(
-            side="right")
+        self.btn_install.pack(side="left")
+        ttk.Button(act, text="一键安装我的配置", style="Ghost.TButton",
+                   command=self._install_profile).pack(side="left", padx=(8, 0))
+        ttk.Button(act, text="清理缓存", style="Ghost.TButton",
+                   command=self._clear_cache).pack(side="left", padx=(8, 0))
 
         self.auto_dep = tk.BooleanVar(value=True)
-        ttk.Checkbutton(act, text="自动补齐缺失依赖", variable=self.auto_dep).pack(
-            side="right", padx=(0, 12))
+        ttk.Checkbutton(act, text="自动补依赖", variable=self.auto_dep).pack(
+            side="right")
+        self.force_bep = tk.BooleanVar(value=False)
+        ttk.Checkbutton(act, text="重装 BepInEx", variable=self.force_bep).pack(
+            side="right", padx=(0, 14))
 
         # ===== 日志 =====
-        logf = ttk.LabelFrame(self.root, text=" ③ 运行日志 ", padding=8)
-        logf.pack(fill="both", expand=False, padx=12, pady=(6, 12))
+        self.log_head = tk.Frame(outer, bg=BG)
+        self.log_head.pack(fill="x", pady=(12, 6))
+        tk.Label(self.log_head, text="运行日志", bg=BG, fg=MUTED,
+                 font=(F, 9, "bold")).pack(side="left")
+        self.log_toggle = ttk.Button(self.log_head, text="收起", style="Mini.TButton",
+                                     command=self._toggle_log)
+        self.log_toggle.pack(side="right")
 
-        self.log = tk.Text(logf, height=11, wrap="word", font=(MONO, 9),
-                           bg="#fbfbfb", relief="flat", state="disabled")
+        self.log_outer, self.log_inner = self._card(outer)
+        self.log_outer.pack(fill="x")
+
+        self.log = tk.Text(self.log_inner, height=6, wrap="word", font=(MONO, 9),
+                           bg="#fbfcfd", fg="#374151", relief="flat",
+                           padx=12, pady=8, state="disabled",
+                           insertbackground=TEXT, selectbackground=ACCENT_LT)
         self.log.pack(side="left", fill="both", expand=True)
-        lsb = ttk.Scrollbar(logf, orient="vertical", command=self.log.yview)
+        lsb = ttk.Scrollbar(self.log_inner, orient="vertical", command=self.log.yview)
         self.log.configure(yscrollcommand=lsb.set)
         lsb.pack(side="right", fill="y")
 
-        self.progress = ttk.Progressbar(self.root, mode="indeterminate")
+        self.progress = ttk.Progressbar(self.root, mode="indeterminate",
+                                        style="Accent.Horizontal.TProgressbar")
+
+    def _fit_window(self):
+        """按屏幕可用空间和内容实际需要定尺寸，避免高 DPI 下窗口超出屏幕被裁掉"""
+        self.root.update_idletasks()
+        sw = self.root.winfo_screenwidth()
+        sh = self.root.winfo_screenheight()
+        w = max(1080, min(self.root.winfo_reqwidth() + 12, sw - 80))
+        h = max(680, min(self.root.winfo_reqheight() + 12, sh - 110))
+        x = max(0, (sw - w) // 2)
+        y = max(0, (sh - h) // 2 - 26)
+        self.root.geometry(f"{w}x{h}+{x}+{y}")
+
+        # 标题栏/边框会吃掉一截高度，实测后再补一次，保证底部日志不被裁
+        self.root.update_idletasks()
+        need, have = self.root.winfo_reqheight(), self.root.winfo_height()
+        if have < need:
+            h = min(h + (need - have) + 8, sh - 110)
+            y = max(0, (sh - h) // 2 - 26)
+            self.root.geometry(f"{w}x{h}+{x}+{y}")
+        self.root.minsize(min(1000, w), min(660, h))
 
     # -------------------------------------------------- 日志
     def _log(self, msg):
@@ -216,21 +523,33 @@ class App:
             pass
         self.root.after(120, self._drain_log)
 
+    def _toggle_log(self):
+        if self._log_open:
+            self.log_outer.pack_forget()
+            self.log_toggle.configure(text="展开")
+            self._log_open = False
+        else:
+            self.log_outer.pack(fill="x")
+            self.log_toggle.configure(text="收起")
+            self._log_open = True
+
     def _set_busy(self, busy):
         self.busy = busy
         state = "disabled" if busy else "normal"
-        self.btn_install.configure(state=state)
-        self.btn_offline.configure(state=state)
+        for b in (self.btn_install, self.btn_offline, self.btn_detail_install):
+            b.configure(state=state)
         if busy:
             self.progress.pack(fill="x", side="bottom")
-            self.progress.start(12)
+            self.progress.start(14)
         else:
             self.progress.stop()
             self.progress.pack_forget()
 
+    def _chip(self, text, fg, bg):
+        self.chip.configure(text=text, fg=fg, bg=bg)
+
     # -------------------------------------------------- 本地离线包
     def _init_local_dir(self):
-        """优先用配置里的目录，其次用工具自带的 mods/ 文件夹"""
         cand = (self.cfg.get("local_mods_dir") or "").strip()
         d = None
         if cand and Path(cand).exists():
@@ -270,7 +589,7 @@ class App:
             messagebox.showinfo("提示", "正在安装中，请稍候")
             return
         if not self.game_dir:
-            messagebox.showerror("错误", "没找到游戏目录，请先点「手动选择」")
+            messagebox.showerror("错误", "没找到游戏目录，请先点「选择」")
             return
         if not self.local_dir:
             self._pick_local_dir()
@@ -286,7 +605,7 @@ class App:
 
         self._set_busy(True)
         self._log("")
-        self._log("=" * 60)
+        self._log("=" * 58)
         self._log(f"离线安装 —— 目标: {self.game_dir}")
 
         def work():
@@ -299,7 +618,7 @@ class App:
                     proxy=self.cfg.get("proxy", ""),
                     log=self._log,
                 )
-                self._log("=" * 60)
+                self._log("=" * 58)
                 if failed:
                     self._log(f"完成：成功 {ok} 个，失败 {len(failed)} 个")
                     for n, err in failed:
@@ -359,20 +678,16 @@ class App:
 
     def _update_status(self):
         if not self.game_dir:
-            self.status_var.set("未找到游戏，请点「手动选择」指定目录")
-            self.status_lbl.configure(style="Bad.TLabel")
+            self._chip("未找到游戏", BAD, BAD_BG)
             return
 
         db = core.load_installed()
         if core.is_bepinex_installed(self.game_dir):
             plugins = self.game_dir / "BepInEx" / "plugins"
             n_dll = len(list(plugins.rglob("*.dll"))) if plugins.exists() else 0
-            self.status_var.set(
-                f"BepInEx 已就绪 · 已安装 {len(db)} 个 Mod · plugins 内 {n_dll} 个 dll")
-            self.status_lbl.configure(style="Ok.TLabel")
+            self._chip(f"BepInEx 就绪 · {len(db)} 个 Mod · {n_dll} 个 dll", OK, OK_BG)
         else:
-            self.status_var.set("BepInEx 未安装（首次安装会自动装好，无需手动）")
-            self.status_lbl.configure(style="Bad.TLabel")
+            self._chip("BepInEx 未安装（首次安装会自动装好）", WARN, WARN_BG)
 
     # -------------------------------------------------- 索引
     def _load_index_from_cache(self):
@@ -380,7 +695,11 @@ class App:
             try:
                 import json
                 with open(core.INDEX_CACHE, "r", encoding="utf-8") as f:
-                    self.index = core.ModIndex(json.load(f))
+                    data = json.load(f)
+                if not core._index_is_current(data):
+                    self.count_var.set("点「刷新索引」获取带图标的 Mod 列表")
+                    return
+                self.index = core.ModIndex(data)
                 self._log(f"已载入本地索引：{len(self.index.packages)} 个 Mod")
                 self._show_popular()
                 return
@@ -416,26 +735,61 @@ class App:
             return f"{n/1_000:.0f}K"
         return str(n)
 
+    def _set_tab(self, which):
+        for name, btn in (("hot", self.tab_hot), ("all", self.tab_all),
+                          ("inst", self.tab_inst)):
+            btn.configure(style="TabOn.TButton" if name == which else "TabOff.TButton")
+
     def _populate(self, packages):
         self.tree.delete(*self.tree.get_children())
+        self._base_tag.clear()
+        self._hover = None
+
         db = core.load_installed()
         installed_lower = {k.lower() for k in db}
 
-        for p in packages:
+        for i, p in enumerate(packages):
             latest = self.index.latest_version(p)
             if not latest:
                 continue
             name = p["full_name"]
             is_inst = name.lower() in installed_lower
             mark = "☑" if name in self.selected else "☐"
-            state = f"已装 v{db[name]['version']}" if is_inst and name in db else (
-                "已安装" if is_inst else "—")
-            self.tree.insert("", "end", iid=name, values=(
-                mark, name, latest["version_number"],
-                self._fmt_dl(latest.get("downloads")), state
-            ), tags=("installed" if is_inst else "notinstalled",))
+            if is_inst:
+                ver = db.get(name, {}).get("version", latest["version_number"])
+                state = f"已装 v{ver}"
+            else:
+                state = "—"
 
-        self.count_var.set(f"共 {len(self.tree.get_children())} 个 Mod · 已勾选 {len(self.selected)} 个")
+            base = "even" if i % 2 == 0 else "odd"
+            self._base_tag[name] = base
+            self.tree.insert(
+                "", "end", iid=name, text="",
+                values=(mark, name, latest["version_number"],
+                        self._fmt_dl(latest.get("downloads")), state),
+                tags=(base,))
+
+            icon_url = latest.get("icon", "")
+            if icon_url:
+                self.icons.get(icon_url, 40,
+                               lambda photo, n=name: self._set_row_icon(n, photo))
+
+        self.count_var.set(f"{len(self.tree.get_children())} 个 · 已勾选 {len(self.selected)}")
+
+        # 列表刷新后如果没有选中项，自动选中第一行，右边详情不至于空着
+        kids = self.tree.get_children()
+        if kids and not self.tree.selection():
+            self.tree.selection_set(kids[0])
+            self.tree.focus(kids[0])
+
+    def _set_row_icon(self, iid, photo):
+        if not photo:
+            return
+        try:
+            if self.tree.exists(iid):
+                self.tree.item(iid, image=photo)
+        except Exception:
+            pass
 
     def _refresh_list(self):
         if not self.index:
@@ -450,12 +804,14 @@ class App:
         if not self.index:
             return
         self.search_var.set("")
+        self._set_tab("all")
         self._populate(self.index.packages)
 
     def _show_popular(self):
         if not self.index:
             return
         self.search_var.set("")
+        self._set_tab("hot")
         self._populate(self.index.popular(60))
 
     def _show_installed(self):
@@ -463,6 +819,7 @@ class App:
             return
         db = core.load_installed()
         self.search_var.set("")
+        self._set_tab("inst")
         pkgs = []
         for name in db:
             p = self.index.get(name)
@@ -472,15 +829,124 @@ class App:
             self._log("还没有安装任何 Mod")
         self._populate(pkgs)
 
+    # -------------------------------------------------- 详情面板
+    def _show_detail_placeholder(self):
+        self.d_icon.configure(image="")
+        self.d_name.configure(text="选一个 Mod 看详情", fg=MUTED)
+        self.d_meta.configure(text="左边点一行，这里会显示图标、说明和依赖")
+        self.d_desc.configure(text="")
+        self.d_deps.configure(text="")
+        self.btn_detail_install.configure(state="disabled")
+
+    def _current_pkg(self):
+        sel = self.tree.selection()
+        if not sel or not self.index:
+            return None, None
+        pkg = self.index.get(sel[0])
+        if not pkg:
+            return None, None
+        return pkg, self.index.latest_version(pkg)
+
+    def _show_detail(self):
+        pkg, latest = self._current_pkg()
+        if not pkg:
+            self._show_detail_placeholder()
+            return
+
+        name = pkg["full_name"]
+        db = core.load_installed()
+        inst = next((v for k, v in db.items() if k.lower() == name.lower()), None)
+
+        self.d_name.configure(text=pkg.get("name") or name, fg=TEXT)
+
+        bits = [pkg.get("owner") or "", f"v{latest['version_number']}",
+                f"↓ {self._fmt_dl(latest.get('downloads'))}"]
+        size = latest.get("file_size") or 0
+        if size:
+            bits.append(f"{size/1048576:.1f} MB" if size > 1048576 else f"{size/1024:.0f} KB")
+        if inst:
+            bits.append(f"已安装 v{inst['version']}")
+        self.d_meta.configure(text="  ·  ".join([b for b in bits if b]))
+
+        desc = (latest.get("description") or "").strip()
+        self.d_desc.configure(text=desc[:300] + ("…" if len(desc) > 300 else ""))
+
+        deps = latest.get("dependencies") or []
+        if deps:
+            names = []
+            for d in deps[:6]:
+                dn, dv = core._parse_dep(d)
+                names.append(dn.split("-", 1)[-1] if "-" in dn else dn)
+            more = f" 等 {len(deps)} 个" if len(deps) > 6 else ""
+            self.d_deps.configure(text="依赖：" + "、".join(names) + more)
+        else:
+            self.d_deps.configure(text="无额外依赖")
+
+        self.btn_detail_install.configure(
+            state="disabled" if self.busy else "normal",
+            text="重新安装" if inst else "安装这个")
+
+        icon_url = latest.get("icon", "")
+        self.d_icon.configure(image="")
+        if icon_url:
+            self.icons.get(icon_url, 112,
+                           lambda photo: self._set_detail_icon(photo))
+
+    def _set_detail_icon(self, photo):
+        if photo:
+            try:
+                self.d_icon.configure(image=photo)
+            except Exception:
+                pass
+
+    def _open_web(self):
+        pkg, latest = self._current_pkg()
+        if not pkg:
+            return
+        url = (latest.get("website_url") or pkg.get("package_url") or "")
+        if url:
+            webbrowser.open(url)
+
+    def _install_detail(self):
+        pkg, _ = self._current_pkg()
+        if pkg:
+            self._run_install([pkg["full_name"]], "安装 Mod")
+
+    def _uninstall_detail(self):
+        sel = self.tree.selection()
+        if not sel:
+            return
+        self._do_uninstall(sel[0])
+
     # -------------------------------------------------- 勾选
     def _on_click(self, event):
-        item = self.tree.identify_row(event.y)
-        col = self.tree.identify_column(event.x)
-        if not item:
+        iid = self.tree.identify_row(event.y)
+        if not iid:
             return
-        if col in ("#1", "#2"):
-            self._toggle(item)
+        col = self.tree.identify_column(event.x)
+        # #0=图标  #1=勾选  #2=名称 … 只有勾选列切换勾选，点名称列走默认选中（看详情）
+        if col == "#1":
+            self._toggle(iid)
             return "break"
+
+    def _on_double(self, event):
+        iid = self.tree.identify_row(event.y)
+        if iid:
+            self._toggle(iid)
+
+    def _on_motion(self, event):
+        iid = self.tree.identify_row(event.y)
+        if iid == self._hover:
+            return
+        if self._hover and self.tree.exists(self._hover):
+            self.tree.item(self._hover, tags=(self._base_tag.get(self._hover, "even"),))
+        self._hover = iid
+        if iid:
+            base = self._base_tag.get(iid, "even")
+            self.tree.item(iid, tags=(base, "hover"))
+            self.tree.configure(cursor="hand2")
+        else:
+            self.tree.configure(cursor="")
 
     def _toggle_current(self):
         sel = self.tree.selection()
@@ -494,7 +960,8 @@ class App:
         else:
             self.selected.add(iid)
             self.tree.set(iid, "sel", "☑")
-        self.count_var.set(f"共 {len(self.tree.get_children())} 个 Mod · 已勾选 {len(self.selected)} 个")
+        self.count_var.set(
+            f"{len(self.tree.get_children())} 个 · 已勾选 {len(self.selected)}")
 
     # -------------------------------------------------- 安装
     def _run_install(self, wanted, title):
@@ -502,7 +969,7 @@ class App:
             messagebox.showinfo("提示", "正在安装中，请稍候")
             return
         if not self.game_dir:
-            messagebox.showerror("错误", "没找到游戏目录，请先点「手动选择」")
+            messagebox.showerror("错误", "没找到游戏目录，请先点「选择」")
             return
         if not self.index:
             messagebox.showerror("错误", "Mod 列表还没加载，请先点「刷新索引」")
@@ -513,7 +980,7 @@ class App:
 
         self._set_busy(True)
         self._log("")
-        self._log("=" * 60)
+        self._log("=" * 58)
         self._log(f"{title} —— 目标: {self.game_dir}")
 
         def work():
@@ -526,7 +993,7 @@ class App:
                     backup=self.cfg.get("backup_before_install", True),
                     log=self._log,
                 )
-                self._log("=" * 60)
+                self._log("=" * 58)
                 if failed:
                     self._log(f"完成：成功 {ok} 个，失败 {len(failed)} 个")
                     for n, err in failed:
@@ -545,6 +1012,7 @@ class App:
     def _after_install(self):
         self._update_status()
         self._refresh_list()
+        self._show_detail()
         messagebox.showinfo(
             "完成",
             "Mod 安装完成！\n\n"
@@ -569,12 +1037,7 @@ class App:
         self._log(f"使用配置文件中的 {len(wanted)} 个 Mod")
         self._run_install(wanted, "一键安装我的配置")
 
-    def _uninstall_selected(self):
-        sel = self.tree.selection()
-        if not sel:
-            messagebox.showinfo("提示", "请先在列表里选中一个 Mod")
-            return
-        name = sel[0]
+    def _do_uninstall(self, name):
         db = core.load_installed()
         if not any(k.lower() == name.lower() for k in db):
             messagebox.showinfo("提示", f"{name} 没有安装记录，无法卸载")
@@ -584,14 +1047,19 @@ class App:
         ok, msg = core.uninstall_mod(self.index, name, self.game_dir, log=self._log)
         self._update_status()
         self._refresh_list()
+        self._show_detail_placeholder()
         messagebox.showinfo("完成" if ok else "失败", msg)
+
+    def _uninstall_selected(self):
+        sel = self.tree.selection()
+        if sel:
+            self._do_uninstall(sel[0])
 
     def _clear_cache(self):
         core.clear_cache(log=self._log)
 
 
 def main():
-    # 依赖检查
     try:
         core.check_dependencies()
     except Exception as e:

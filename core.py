@@ -242,7 +242,7 @@ def _session(proxy=""):
 
 
 def _slim_package(pkg):
-    """精简索引字段，把 34MB 的原始索引压到几 MB"""
+    """精简索引字段，把 34MB 的原始索引压到合理体积（保留图标等展示用字段）"""
     versions = []
     for v in pkg.get("versions", []):
         versions.append({
@@ -252,6 +252,9 @@ def _slim_package(pkg):
             "description": v.get("description", ""),
             "downloads": v.get("downloads", 0),
             "date_created": v.get("date_created", ""),
+            "icon": v.get("icon", ""),
+            "website_url": v.get("website_url", ""),
+            "file_size": v.get("file_size", 0),
         })
     return {
         "full_name": pkg.get("full_name"),
@@ -260,6 +263,20 @@ def _slim_package(pkg):
         "package_url": pkg.get("package_url"),
         "versions": versions,
     }
+
+
+INDEX_SCHEMA = 2      # 索引结构版本；字段变化时递增，旧缓存会自动失效
+
+
+def _index_is_current(data):
+    """判断缓存索引是否包含当前需要的字段"""
+    if not data or not isinstance(data, list):
+        return False
+    first = data[0]
+    if not first.get("versions"):
+        return False
+    v0 = first["versions"][0]
+    return all(k in v0 for k in ("icon", "website_url", "file_size"))
 
 
 def fetch_index(force=False, proxy="", log=print):
@@ -275,8 +292,10 @@ def fetch_index(force=False, proxy="", log=print):
             try:
                 with open(INDEX_CACHE, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                log(f"使用本地缓存索引（{len(data)} 个 mod，{int(age/60)} 分钟前更新）")
-                return data
+                if _index_is_current(data):
+                    log(f"使用本地缓存索引（{len(data)} 个 mod，{int(age/60)} 分钟前更新）")
+                    return data
+                log("本地索引缺少图标字段，重新下载…")
             except Exception:
                 pass
 
