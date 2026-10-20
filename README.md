@@ -51,6 +51,7 @@
 - **结构智能识别** —— 按包内实际结构决定落点，`plugins/`、`Plugins/`、`patchers/`、自带 `BepInEx/` 都能正确归类
 - **离线安装** —— `mods/` 目录放好 zip，网吧不联网也能装
 - **在线安装** —— 界面直接浏览 Thunderstore 全部 6500+ Mod，搜名字勾选即可
+- **列表始终是最新的** —— 启动时先用本地缓存秒开，再后台从 Thunderstore API 同步一遍（日志会显示下载进度），不打断你正在看的详情
 - **界面带图标** —— 列表和详情面板直接显示 Thunderstore 官方图标，选 Mod 不用只看名字猜
 - **一键翻译** —— 详情面板点「翻译」，Mod 名字和英文简介立刻变中文，再点还原；名字走内置词表（不联网也准），简介走免费翻译接口
 - **自动清旧版本** —— 同一个 Mod 装了新旧两个版本会导致重复加载、游戏闪退，每次安装自动清理
@@ -199,7 +200,16 @@ Thunderstore 上每个 Mod 的 `manifest.json` 里都有 `dependencies` 字段�
 
 - **名字走内置词表**：按社区 6522 个包的实际用词统计出来的，`MoreShopItems` → `更多商店物品`、`NoSaveDelete` → `无存档删除`、`MoreReviveHP` → `更多复活生命值`。**不联网**，所以又快又稳定。
 - 词表覆盖不到的名字（`BepInExPack`、`REPOLib` 这类专有名词）才走在线翻译，翻不出来就保持原文，不会硬凑。
-- **简介走免费接口**：配了 `proxy` 或探测到本机代理时优先用 Google（译文更顺），否则用 MyMemory（国内可直连，不需要 API Key，也不需要注册）。
+- **简介走免费接口**，按网络情况自动挑：
+
+| 顺序 | 翻译源 | 什么时候用 | 说明 |
+| --- | --- | --- | --- |
+| 1 | **Google** | 配了 `proxy`，或探测到本机代理端口 | 译文最顺，但国内直连打不通 |
+| 2 | **腾讯翻译君**（transmart） | 默认走这个 | 国内直连、不用 Key、不用注册，0.7 秒左右一条 |
+| 3 | **MyMemory** | 前两个都失败 | 兜底，免费额度每天 5000 字符 |
+
+> 日志里出现「Google 连不上（国内需代理），改用腾讯翻译君」是**正常现象**，不是故障——国内本来就连不上 Google。想用 Google 就在 `config.json` 里填 `"proxy": "http://127.0.0.1:7897"`。
+
 - **译文缓存在** `data/translate_cache.json`：同一个 Mod 第二次点秒出，断网也能看。
 
 > 名字用词表而不是机翻，是因为机翻对 `MoreShopItems` 这种连写标识符经常翻成半截（实测会翻成「商店项目」，把 More 丢了）。词表是确定性映射，不会出错。
@@ -310,7 +320,13 @@ repo-mod-installer/
 如果还是空的，看日志里的报错：网络不通就在 `config.json` 填 `proxy`，然后点「刷新」。
 
 **Q：点了「翻译」没反应 / 提示翻译失败？**  
-名字是本地词表翻的，不会失败；失败的只会是简介，说明两个免费接口都连不上。在 `config.json` 里填 `"proxy": "http://127.0.0.1:7897"`（改成你自己的代理端口）再点一次即可。日志里会写明走了哪个接口。
+名字是本地词表翻的，不会失败；失败的只会是简介，说明腾讯翻译君和 MyMemory 都连不上。在 `config.json` 里填 `"proxy": "http://127.0.0.1:7897"`（改成你自己的代理端口）再点一次即可。日志里会写明走了哪个接口。
+
+**Q：日志说「Google 连不上」，是不是坏了？**  
+不是。Google 翻译在国内直连是不通的，工具会自动换成腾讯翻译君，译文质量也够用。想用 Google 就配 `proxy`。
+
+**Q：Mod 列表是打包时的旧数据吗？**  
+不是。exe 里带的那份只是让第一次打开就有列表可看，启动后会自动调 Thunderstore API 换成线上最新的（日志里能看到下载进度）。之后每 24 小时或点「刷新」时再同步。
 
 **Q：日志提示某 Mod 依赖某个包，本地没有，要紧吗？**  
 这是没勾选「自动补齐缺失依赖」或处于断网状态时的提示。多数 Mod 缺可选依赖也能跑，游戏能正常启动就不用管。  
@@ -364,7 +380,7 @@ Installing mods for R.E.P.O. by hand involves three tedious layers: setting up t
 - Classifies each archive's layout and extracts every file to its correct destination
 - Works fully **offline** from a local `mods/` folder — ideal for internet cafés
 - A card-style GUI with Thunderstore icons in the list and a detail panel (author, size, downloads, dependencies), loaded asynchronously so the list opens instantly
-- One-click translation in the detail panel: mod names go through a built-in glossary (offline and deterministic), descriptions through a free endpoint (Google when a proxy is available, MyMemory otherwise). Results are cached locally.
+- One-click translation in the detail panel: mod names go through a built-in glossary (offline and deterministic), descriptions through a free endpoint — Google when a proxy is available, otherwise Tencent Transmart (works from mainland China without a proxy), with MyMemory as a last resort. Results are cached locally.
 - Removes stale versions of the same mod (a common cause of crashes)
 - Backs up the existing `BepInEx` directory before the first install
 - Uses the **r2modman / Gale** directory convention, so it stays compatible with those managers

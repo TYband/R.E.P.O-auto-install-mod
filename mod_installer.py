@@ -743,6 +743,9 @@ class App:
             self.index = core.ModIndex(data)
             self._log(f"已载入本地索引：{len(self.index.packages)} 个 Mod")
             self._show_popular()
+            # 列表先用缓存秒开，再后台去 API 换成线上最新的
+            if core.needs_refresh():
+                self._refresh_index(silent=True)
             return
 
         if data:
@@ -753,23 +756,42 @@ class App:
         self.count_var.set("正在加载 Mod 列表…")
         self._refresh_index()
 
-    def _refresh_index(self):
+    def _refresh_index(self, silent=False):
+        """
+        从 Thunderstore API 拉最新 Mod 列表。
+        silent=True 时后台静默同步：不锁按钮、不清空当前列表。
+        """
         if self.busy:
             return
-        self._set_busy(True)
-        self._log("开始刷新索引…")
+        if not silent:
+            self._set_busy(True)
+            self._log("开始刷新索引…")
+        else:
+            self._log("后台同步 Thunderstore 最新列表…")
+
+        def on_progress(done, total):
+            # 服务器是 gzip 传输，Content-Length 是压缩后的大小，
+            # 解压后的字节数会超过它，这时只报已下载量
+            if total and total >= done:
+                self._log(f"  已下载 {done/1048576:.1f} / {total/1048576:.1f} MB")
+            else:
+                self._log(f"  已下载 {done/1048576:.1f} MB")
 
         def work():
             try:
                 pkgs = core.fetch_index(force=True, proxy=self.cfg.get("proxy", ""),
-                                        log=self._log)
+                                        log=self._log, progress=on_progress)
                 self.index = core.ModIndex(pkgs)
                 self._ui(self._show_popular)
             except Exception as e:
                 self._log(f"[错误] 索引加载失败：{e}")
-                self._ui(lambda: self.count_var.set("索引加载失败，点「刷新」重试"))
+                if not silent:
+                    self._ui(lambda: self.count_var.set("索引加载失败，点「刷新」重试"))
+                else:
+                    self._ui(lambda: self.count_var.set("线上同步失败，当前是本地缓存"))
             finally:
-                self._ui(lambda: self._set_busy(False))
+                if not silent:
+                    self._ui(lambda: self._set_busy(False))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -788,6 +810,7 @@ class App:
             btn.configure(style="TabOn.TButton" if name == which else "TabOff.TButton")
 
     def _populate(self, packages):
+        prev = self.tree.selection()
         self.tree.delete(*self.tree.get_children())
         self._base_tag.clear()
         self._hover = None
@@ -823,9 +846,13 @@ class App:
 
         self.count_var.set(f"{len(self.tree.get_children())} 个 · 已勾选 {len(self.selected)}")
 
-        # 列表刷新后如果没有选中项，自动选中第一行，右边详情不至于空着
+        # 列表刷新后保留原来的选中项（后台同步不会打断浏览）
+        keep = prev[0] if prev and self.tree.exists(prev[0]) else ""
         kids = self.tree.get_children()
-        if kids and not self.tree.selection():
+        if keep:
+            self.tree.selection_set(keep)
+            self.tree.focus(keep)
+        elif kids and not self.tree.selection():
             self.tree.selection_set(kids[0])
             self.tree.focus(kids[0])
 

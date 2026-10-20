@@ -45,6 +45,7 @@ DATA_DIR = BASE_DIR / "data"
 CACHE_DIR = DATA_DIR / "cache"
 BACKUP_DIR = DATA_DIR / "backups"
 INDEX_CACHE = DATA_DIR / "index.json"
+SEED_MARK = DATA_DIR / ".seeded"   # 存在说明当前索引是打包时塞进去的，该去 API 换新了
 INSTALLED_DB = DATA_DIR / "installed.json"
 CONFIG_PATH = BASE_DIR / "config.json"
 
@@ -70,6 +71,7 @@ def _release_bundled_assets():
     meipass = Path(getattr(sys, "_MEIPASS", str(BASE_DIR)))
 
     # 1) 索引种子 → data/index.json（只在没有缓存时放一次）
+    #    放完打个标记，界面启动后会拿它去 API 换最新列表
     if not INDEX_CACHE.exists():
         for name in ("index.json.gz", "index.json"):
             src = meipass / "seed" / name
@@ -83,6 +85,7 @@ def _release_bundled_assets():
                         shutil.copyfileobj(fi, fo)
                 else:
                     shutil.copy2(src, INDEX_CACHE)
+                SEED_MARK.write_text("seed", encoding="utf-8")
                 break
             except Exception:
                 pass
@@ -324,9 +327,19 @@ def _index_is_current(data):
     return all(k in v0 for k in ("icon", "website_url", "file_size"))
 
 
-def fetch_index(force=False, proxy="", log=print):
+def needs_refresh():
+    """要不要去 API 拉最新列表：没缓存 / 缓存是打包时塞进来的 / 缓存过期"""
+    if not INDEX_CACHE.exists():
+        return True
+    if SEED_MARK.exists():
+        return True
+    return (time.time() - INDEX_CACHE.stat().st_mtime) > INDEX_MAX_AGE
+
+
+def fetch_index(force=False, proxy="", log=print, progress=None):
     """
     获取 Thunderstore 的 R.E.P.O. 社区包索引（带本地缓存）
+    progress(done_bytes, total_bytes) 可选，用来显示下载进度
     返回 list[dict]
     """
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -344,19 +357,30 @@ def fetch_index(force=False, proxy="", log=print):
             except Exception:
                 pass
 
-    log("正在从 Thunderstore 下载 mod 索引，首次需要一会儿…")
+    log("正在从 Thunderstore API 拉取 Mod 列表…")
     s = _session(proxy)
     try:
-        resp = s.get(INDEX_URL, timeout=120)
+        resp = s.get(INDEX_URL, timeout=120, stream=True)
         resp.raise_for_status()
-        raw = resp.json()
+        total = int(resp.headers.get("Content-Length") or 0)
+        buf = bytearray()
+        last = 0
+        for chunk in resp.iter_content(262144):
+            if not chunk:
+                continue
+            buf.extend(chunk)
+            # 每 4MB 报一次进度，让人知道它没卡死
+            if progress and total and len(buf) - last >= 4 * 1024 * 1024:
+                last = len(buf)
+                progress(len(buf), total)
+        raw = json.loads(buf.decode("utf-8"))
     except Exception as e:
         # 下载失败时退回旧缓存，总比列表空白强
         if INDEX_CACHE.exists():
             try:
                 with open(INDEX_CACHE, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                log(f"[警告] 索引下载失败（{type(e).__name__}），改用本地旧索引")
+                log(f"[警告] API 拉取失败（{type(e).__name__}），继续用本地索引")
                 return data
             except Exception:
                 pass
@@ -370,7 +394,13 @@ def fetch_index(force=False, proxy="", log=print):
         json.dump(slim, f, ensure_ascii=False)
     tmp.replace(INDEX_CACHE)
 
-    log(f"索引更新完成，共 {len(slim)} 个 mod")
+    # 已经拿到线上数据了，种子标记作废，之后按 24 小时过期判断
+    try:
+        SEED_MARK.unlink()
+    except Exception:
+        pass
+
+    log(f"索引更新完成，共 {len(slim)} 个 mod（来自 Thunderstore API）")
     return slim
 
 
@@ -1174,15 +1204,42 @@ def _save_trans_cache(cache):
 
 
 def _tr_google(text, target, proxy, timeout=8):
-    """Google 翻译的免费网页接口（client=gtx），无需 Key"""
+    """Google 翻译的免费网页接口（client=gtx），无需 Key。国内需代理"""
     r = _session(proxy).get(
         "https://translate.googleapis.com/translate_a/single",
         params={"client": "gtx", "sl": "auto", "tl": target, "dt": "t", "q": text},
+        headers={"User-Agent": _BROWSER_UA},
         timeout=timeout,
     )
     r.raise_for_status()
     data = r.json()
     out = "".join(seg[0] for seg in data[0] if seg and seg[0])
+    return out.strip()
+
+
+def _tr_tencent(text, target, proxy, timeout=8):
+    """
+    腾讯翻译君（transmart）的免费网页接口。
+    国内直连、不需要 Key，译文比 MyMemory 顺，作为没代理时的主力。
+    """
+    lang = "zh" if target.lower().startswith("zh") else target
+    body = {
+        "header": {"fn": "auto_translation", "client_key": _TENCENT_KEY},
+        "type": "plain",
+        "model_category": "normal",
+        "source": {"lang": "en", "text_list": [text[:1500]]},
+        "target": {"lang": lang},
+    }
+    r = _session(proxy).post("https://transmart.qq.com/api/imt", json=body,
+                             headers={"User-Agent": _BROWSER_UA,
+                                      "Referer": "https://transmart.qq.com/zh-CN/index"},
+                             timeout=timeout)
+    r.raise_for_status()
+    d = r.json()
+    arr = d.get("auto_translation") or []
+    out = arr[0] if arr and isinstance(arr[0], str) else ""
+    if not out:
+        raise RuntimeError(d.get("message") or "transmart 返回异常")
     return out.strip()
 
 
@@ -1201,13 +1258,21 @@ def _tr_mymemory(text, target, proxy, timeout=8):
     return html.unescape(out)
 
 
-TRANS_PROVIDERS = [("google", _tr_google), ("mymemory", _tr_mymemory)]
+# 顺序即优先级；实际顺序会按网络情况动态调整，见 translate_text()
+TRANS_PROVIDERS = [("google", _tr_google),
+                   ("tencent", _tr_tencent),
+                   ("mymemory", _tr_mymemory)]
 
 _GOOGLE_OK = None               # 启动时探测结果，None = 还没测
 _AUTO_PROXY = ""                # 探测到的本机代理，仅用于翻译
 
 # 常见本地代理端口（Clash / V2Ray / Shadowsocks）
 _LOCAL_PROXY_PORTS = ("7897", "7890", "10809", "10808", "1080")
+
+_BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+               "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+_TENCENT_KEY = ("browser-chrome-110.0.0-Win-df4bd4c5-a65d-44b2-a40f-"
+                "42f34f3535f2-1677486696487")
 
 # 这些是专有名词，拆开反而翻不出来（BepInExPack 不能变成 Bep In Ex Pack）
 _TRANS_KEEP = ("bepinex", "repolib", "menulib", "lethallib", "xunity",
@@ -1250,7 +1315,7 @@ def probe_translation(proxy="", log=None):
 
     _GOOGLE_OK = False
     if log:
-        log("翻译：Google 连不上，改用 MyMemory 免费接口")
+        log("翻译：Google 连不上（国内需代理），改用腾讯翻译君")
     return False
 
 
@@ -1355,10 +1420,15 @@ def translate_text(text, target="zh-CN", proxy="", log=None):
     if key in cache:
         return cache[key]
 
-    # 有代理（配置的或探测到的）或 Google 直连可用 → 先走 Google，否则先走 MyMemory
+    # 有代理（配置的或探测到的）或 Google 直连可用 → Google 打头，
+    # 否则腾讯翻译君打头（国内直连、译文也顺），MyMemory 垫底，Google 最后再试一次
     eff = proxy or _AUTO_PROXY
-    use_google = bool(eff) or bool(_GOOGLE_OK)
-    order = TRANS_PROVIDERS if use_google else list(reversed(TRANS_PROVIDERS))
+    if bool(eff) or bool(_GOOGLE_OK):
+        order = TRANS_PROVIDERS
+    else:
+        order = [("tencent", _tr_tencent),
+                 ("mymemory", _tr_mymemory),
+                 ("google", _tr_google)]
     for pname, fn in order:
         try:
             out = fn(text, target, eff)
