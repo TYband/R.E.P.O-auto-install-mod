@@ -12,6 +12,8 @@ venv/
 build/
 dist/
 *.spec
+dist.zip
+release*.zip
 
 # ---------- 运行时数据（每台机器自己的状态，不入库）----------
 data/
